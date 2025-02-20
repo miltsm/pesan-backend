@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+option go_package = "github.com/miltsm/pesan-backend/product-server";
+
+package product_service;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service Product {
+	rpc CreateNew (NewRequest) returns (NewReply);
+	rpc UploadPhotos (stream NewPhoto) returns (google.protobuf.Empty);
+}
+
+message NewRequest {
+	string name = 1;
+	optional string description = 2;
+	string unit_label = 3;
+	double unit_price = 4;
+	repeated Category categories = 5;
+}
+
+message Category {
+	// for existing category selection
+	optional string category_id = 1;
+	// for new category
+	optional string name = 2;
+	optional string description = 3;
+	optional google.protobuf.Timestamp available_from = 4;
+	optional google.protobuf.Timestamp available_until = 5;
+	repeated string available_weekly = 6;
+}	
+
+message NewReply {
+	string new_product_id = 1;
+}
+
+message NewPhoto {
+	bytes chunk = 1;
+}
