@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net"
-	product_server "services/product"
+	"os"
+	product_server "product-server/product/go"
+	"strconv"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,20 +15,20 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-var (
-	port = flag.Int("port", 50051, "The server port")
-)
-
 func main() {
-	flag.Parse()
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	port, err := strconv.ParseInt(os.Getenv("PORT"), 10, 32)
+	if err != nil {
+		log.Fatalf("[WARN] %s", err.Error())
+		port = 50051
+	}
+	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", os.Getenv("HOST"), port))
 	if err != nil {
 		log.Fatalf("[ERROR] %s\n", err.Error())
 		return
 	}
 	srv := grpc.NewServer()
 	product_server.RegisterProductServer(srv, newServer())
-	fmt.Printf("listening to port: %d\n", *port)
+	fmt.Printf("listening to port: %d..\n", port)
 	err = srv.Serve(lis)
 	if err != nil {
 		log.Fatalf("[FATAL] %s\n", err.Error())

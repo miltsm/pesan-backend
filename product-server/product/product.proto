@@ -2,7 +2,7 @@ syntax = "proto3";
 
 option go_package = "github.com/miltsm/pesan-backend/product-server";
 
-package product_service;
+package pesan;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";

@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v5.28.3
-// source: product/product-service.proto
+// source: product.proto
 
 package product_server
 
@@ -20,8 +20,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Product_CreateNew_FullMethodName    = "/product_service.Product/CreateNew"
-	Product_UploadPhotos_FullMethodName = "/product_service.Product/UploadPhotos"
+	Product_CreateNew_FullMethodName    = "/pesan.Product/CreateNew"
+	Product_UploadPhotos_FullMethodName = "/pesan.Product/UploadPhotos"
 )
 
 // ProductClient is the client API for Product service.
@@ -135,7 +135,7 @@ type Product_UploadPhotosServer = grpc.ClientStreamingServer[NewPhoto, emptypb.E
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Product_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "product_service.Product",
+	ServiceName: "pesan.Product",
 	HandlerType: (*ProductServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -150,5 +150,5 @@ var Product_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "product/product-service.proto",
+	Metadata: "product.proto",
 }
