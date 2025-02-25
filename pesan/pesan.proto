@@ -1,18 +1,18 @@
 syntax = "proto3";
 
-option go_package = "github.com/miltsm/pesan-backend/product-server";
+option go_package = "github.com/miltsm/pesan-backend";
 
 package pesan;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
-service Product {
-	rpc CreateNew (NewRequest) returns (NewReply);
-	rpc UploadPhotos (stream NewPhoto) returns (google.protobuf.Empty);
+service Pesan {
+	rpc CreateNewProduct (NewProductRequest) returns (NewProductReply);
+	rpc UploadProductPhotos (stream NewPhoto) returns (google.protobuf.Empty);
 }
 
-message NewRequest {
+message NewProductRequest {
 	string name = 1;
 	optional string description = 2;
 	string unit_label = 3;
@@ -31,7 +31,7 @@ message Category {
 	repeated string available_weekly = 6;
 }	
 
-message NewReply {
+message NewProductReply {
 	string new_product_id = 1;
 }
 
