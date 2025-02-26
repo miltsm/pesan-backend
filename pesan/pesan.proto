@@ -8,8 +8,28 @@ import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
 service Pesan {
+	rpc Onboard(CredentialRequest) returns (ChallengeReply);
+	rpc RegisterPublicKey(AssertRequest) returns (AssertReply);
 	rpc CreateNewProduct (NewProductRequest) returns (NewProductReply);
 	rpc UploadProductPhotos (stream NewPhoto) returns (google.protobuf.Empty);
+}
+
+message CredentialRequest {
+	string user_handle = 1;
+	optional string display_name = 2;
+}
+
+message ChallengeReply {
+	bytes challenge = 1;
+}
+
+message AssertRequest {
+	bytes signed = 1;
+}
+
+message AssertReply {
+	optional string access_token = 1;
+	optional string refresh_token = 2;
 }
 
 message NewProductRequest {

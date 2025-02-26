@@ -11,14 +11,14 @@ import (
 
 func (s *pesanServer) CreateNewProduct(ctx context.Context, r *pesan_backend.NewProductRequest) (*pesan_backend.NewProductReply, error) {
 	newId := uuid.New()
-	_, err := newProductStmt.Exec(newId, r.Name, r.Description, r.UnitLabel, r.UnitPrice)
+	_, err := createProductStmt.Exec(newId, r.Name, r.Description, r.UnitLabel, r.UnitPrice)
 	if err != nil {
 		return nil, err
 	}
 	var categoryErrs []string
 	for i := 0; i < len(r.Categories); i++ {
 		category := r.Categories[i]
-		_, err = newCategoryStmt.Exec(
+		_, err = createCategoryStmt.Exec(
 			category.CategoryId,
 			category.Name,
 			category.Description,
@@ -38,7 +38,7 @@ func (s *pesanServer) CreateNewProduct(ctx context.Context, r *pesan_backend.New
 					categoryErrs = append(categoryErrs, *category.CategoryId)
 					fmt.Printf("[ERROR] unable to update category: %s\n", err.Error())
 				} else {
-					_, err = newProductCategories.Exec(newId, category.CategoryId)
+					_, err = createProductCategoriesStmt.Exec(newId, category.CategoryId)
 					if err != nil {
 						fmt.Printf("[ERROR] unable to added product-category:\n%s(%s) & %s(%s)",
 							r.Name, newId, *category.Name, *category.CategoryId)
@@ -52,7 +52,7 @@ func (s *pesanServer) CreateNewProduct(ctx context.Context, r *pesan_backend.New
 			}
 		} else {
 			// product-categories relation
-			_, err = newProductCategories.Exec(newId, category.CategoryId)
+			_, err = createProductCategoriesStmt.Exec(newId, category.CategoryId)
 			if err != nil {
 				fmt.Printf("[ERROR] unable to added product-category:\n%s(%s) & %s(%s)",
 					r.Name, newId, *category.Name, *category.CategoryId)
