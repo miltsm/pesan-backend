@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	pesan_backend "github.com/miltsm/pesan-backend/pesan/go"
+	pesan_backend "github.com/miltsm/pesan-grpc-stubs/go"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -31,6 +31,7 @@ func main() {
 	var err error
 	var pwd []byte
 	pgPort, err = strconv.ParseInt(os.Getenv("POSTGRES_PORT"), 10, 32)
+
 	if err != nil {
 		fmt.Printf("[WARN] %v\n", err)
 		pgPort = 5432

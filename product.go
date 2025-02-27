@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	pesan_backend "github.com/miltsm/pesan-backend/pesan/go"
+	pesan_backend "github.com/miltsm/pesan-grpc-stubs/go"
 )
 
 func (s *pesanServer) CreateNewProduct(ctx context.Context, r *pesan_backend.NewProductRequest) (*pesan_backend.NewProductReply, error) {

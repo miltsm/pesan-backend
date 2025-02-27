@@ -11,7 +11,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
-	pesan_backend "github.com/miltsm/pesan-backend/pesan/go"
+	pesan_backend "github.com/miltsm/pesan-grpc-stubs/go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
