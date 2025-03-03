@@ -167,9 +167,9 @@ func newServer() *pesanServer {
 	// Webauthn
 	config := &webauthn.Config{
 		RPDisplayName: "Pesan Authentication",
-		RPID:          "localhost:50051",
+		RPID:          "50ec-193-36-237-35.ngrok-free.app",
 		// TODO: include android's identifier
-		RPOrigins: []string{"localhost:3000"},
+		RPOrigins: []string{"https://10.0.2.2:3000", "https://50ec-193-36-237-35.ngrok-free.app"},
 	}
 
 	var wba *webauthn.WebAuthn
