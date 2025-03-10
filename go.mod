@@ -6,10 +6,10 @@ require (
 	github.com/go-webauthn/webauthn v0.12.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
-	github.com/miltsm/pesan-grpc-stubs v0.0.0-20250227134119-1b0658db4fdc
+	github.com/miltsm/pesan-grpc-stubs v0.0.0-20250304100759-33b148503ea5
 	github.com/redis/go-redis/v9 v9.7.1
 	google.golang.org/grpc v1.70.0
-	google.golang.org/protobuf v1.36.1
+	google.golang.org/protobuf v1.36.5
 )
 
 require (
@@ -31,3 +31,5 @@ require (
 	golang.org/x/text v0.22.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20241202173237-19429a94021a // indirect
 )
+
+//replace github.com/miltsm/pesan-grpc-stubs v0.0.0-20250304100759-33b148503ea5 => ../pesan-grpc-stubs
