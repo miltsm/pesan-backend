@@ -27,7 +27,6 @@ CREATE TABLE passkeys (
 	transport text[],
 	flags jsonb,
 	authenticator_aaguid bytea,
-	sign_count integer DEFAULT 0,
 	created_at timestamp DEFAULT LOCALTIMESTAMP,
 	updated_at timestamp DEFAULT LOCALTIMESTAMP,
 	user_id uuid not null REFERENCES users ON DELETE CASCADE

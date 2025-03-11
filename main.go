@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"net/http"
 
@@ -29,15 +30,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// NOTE: chapter - APPLICATION
+// NOTE: core - APPLICATION
+// *this is for an nvim easy jump; consider it as table of contents
 var (
 	db         *sql.DB
 	statements map[StatementKey]*sql.Stmt
 	cache      *redis.Client
 	wbAuthn    *webauthn.WebAuthn
+	apiSecret  []byte
 )
 
 type pesanServer struct {
@@ -49,9 +53,10 @@ func newServer() *pesanServer {
 }
 
 func main() {
+	extractSecrets()
 	establishDb()
 	establishRedis()
-	configWebAuthn()
+	configureWebAuthn()
 	port, err := strconv.ParseInt(os.Getenv("PORT"), 10, 32)
 	if err != nil {
 		log.Fatalf("[WARN] %s", err.Error())
@@ -66,7 +71,7 @@ func main() {
 	}
 	srv := grpc.NewServer()
 	stub.RegisterPesanServer(srv, newServer())
-	fmt.Printf("listening to port: %d..\n", port)
+	fmt.Printf("[INFO] listening to port: %d..\n", port)
 	err = srv.Serve(lis)
 	if err != nil {
 		log.Fatalf("[FATAL] %s\n", err.Error())
@@ -74,13 +79,23 @@ func main() {
 	}
 }
 
-// NOTE: chapter - DATABASE
+// NOTE: core - CONFIG
+func extractSecrets() {
+	var err error
+	apiSecret, err = os.ReadFile(os.Getenv("JWT_SECRET_PATH"))
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+		return
+	}
+}
+
+// NOTE: core - DATABASE
 type StatementKey int
 
 const (
 	CreateUser StatementKey = iota
 	ReadUserByHandle
-	ReadUserWithPublicKeys
+	ReadUserWithPublicKeysByHandle
 	CreatePublicKey
 	CreateProduct
 	CreateCategory
@@ -138,7 +153,7 @@ func prepareStatements() {
 			WHERE
 				user_handle = $1
 		`,
-		ReadUserWithPublicKeys: `
+		ReadUserWithPublicKeysByHandle: `
 			SELECT 
 				u.user_id, u.user_handle, u.display_name,
 				p.passkey_id,
@@ -146,8 +161,7 @@ func prepareStatements() {
 				p.attestation_type,
 				p.transport,
 				p.flags,
-				p.authenticator_aaguid,
-				p.sign_count
+				p.authenticator_aaguid
 			FROM 
 				users u
 			JOIN
@@ -191,7 +205,7 @@ func prepareStatements() {
 	statements = temp
 }
 
-// NOTE: chapter - CACHE
+// NOTE: core - CACHE
 
 // NOTE: might need to cache credentials, just incase user request on another device
 type OnboardCache struct {
@@ -216,6 +230,8 @@ func establishRedis() {
 		DB:       0,
 		Protocol: 2,
 	})
+
+	println("[INFO] cache established!")
 }
 
 func cacheAssertSession(ctx context.Context, session *webauthn.SessionData, user *User) error {
@@ -245,7 +261,8 @@ func cacheAssertSession(ctx context.Context, session *webauthn.SessionData, user
 	return nil
 }
 
-func getUserFromAssertSession(ctx context.Context, key string) (*string, error) {
+func getCachedUserFromAssertSession(ctx context.Context, challengeId string) (*string, error) {
+	key := fmt.Sprintf("asserts:%s", challengeId)
 	result, err := cache.JSONGet(ctx, key, ".user").Result()
 	if err != nil {
 		return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session ended")
@@ -253,8 +270,40 @@ func getUserFromAssertSession(ctx context.Context, key string) (*string, error) 
 	return &result, nil
 }
 
-// NOTE: chapter - WEBAUTHN
-func configWebAuthn() {
+func cacheAttestSession(ctx context.Context, session webauthn.SessionData) error {
+	cacheKey := fmt.Sprintf("attests:%s", session.Challenge)
+
+	marshaledSession, err := json.Marshal(session)
+	if err != nil {
+		return status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	var res string
+	res, err = cache.JSONSet(ctx, cacheKey, "$", marshaledSession).Result()
+	if err != nil || strings.Compare(res, "OK") != 0 {
+		return status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	var isExpiring bool
+	isExpiring, err = cache.ExpireAt(ctx, cacheKey, session.Expires).Result()
+	if err != nil || !isExpiring {
+		return status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	return nil
+}
+
+func getCachedUserFromAttestSession(ctx context.Context, challengeId string) (*string, error) {
+	cacheKey := fmt.Sprintf("attests:%s", challengeId)
+	res, err := cache.JSONGet(ctx, cacheKey, ".user").Result()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+	return &res, nil
+}
+
+// NOTE: core - WEBAUTHN
+func configureWebAuthn() {
 	androidOrigin, webHost := fmt.Sprintf("android:apk-key-hash:%s", os.Getenv("ANDROID_KEY_HASH")), os.Getenv("WBAUTHN_RP_ID")
 	webOrigin := fmt.Sprintf("%s://%s", os.Getenv("WEB_SCHEME"), webHost)
 
@@ -282,9 +331,11 @@ func configWebAuthn() {
 		log.Println(err)
 		// NOTE: don't close the server; user still able to sign up/in with password
 	}
+
+	println("[INFO]")
 }
 
-// NOTE: chapter - SESSIONS
+// NOTE: core - SESSIONS
 type User struct {
 	Id          uuid.UUID             `json:"id"`
 	UserHandle  string                `json:"user_handle"`
@@ -308,6 +359,7 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 	return u.Credentials
 }
 
+// NOTE: core/assert/challenge
 func (s *pesanServer) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardRequest) (*stub.AssertSession, error) {
 	if len(r.UserHandle) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] user handle can't be empty!")
@@ -359,6 +411,7 @@ func (s *pesanServer) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardR
 	return nil, status.Error(codes.AlreadyExists, "[ERROR] user already exists with the given handle")
 }
 
+// NOTE: code/assert/verify
 func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.VerifyPublicKeyRequest) (*stub.UserSession, error) {
 	parsedSignature, err := protocol.ParseCredentialCreationResponseBytes(r.Signed)
 	if err != nil {
@@ -368,32 +421,35 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 	challengeId := parsedSignature.Response.CollectedClientData.Challenge
 
 	var tempUser *string
-	tempUser, err = getUserFromAssertSession(ctx, fmt.Sprintf("asserts:%s", challengeId))
+	tempUser, err = getCachedUserFromAssertSession(ctx, challengeId)
 	if err != nil {
 		return nil, err
 	}
 
-	var marshaledUser User
-	if err = json.Unmarshal([]byte(*tempUser), &marshaledUser); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, "[ERROR] session corrupted. please try again!")
-	}
-
-	verifyLink := fmt.Sprintf("http://localhost:3000/public-key/assert/%v", challengeId)
+	verifyLink := fmt.Sprintf("http://web:3000/public-key/assert/%v", challengeId)
 
 	var res *http.Response
 	res, err = http.Post(verifyLink, "application/json", bytes.NewBuffer(r.Signed))
 	if err != nil {
-		return nil, status.Error(codes.Internal, "[ERROR] unable to verify public key")
+		return nil, status.Errorf(codes.Internal, "[ERROR] unable to verify public key:\n%v", err)
 	}
 	defer res.Body.Close()
 
 	var body []byte
 	body, err = io.ReadAll(res.Body)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
 
 	switch res.StatusCode {
 	case http.StatusAccepted:
 
-		_, err = statements[CreateUser].Exec(marshaledUser.Id, marshaledUser.UserHandle, marshaledUser.DisplayName)
+		var user User
+		if err = json.Unmarshal([]byte(*tempUser), &user); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "[ERROR] session corrupted. unable to unmarshal user\n%v", err)
+		}
+
+		_, err = statements[CreateUser].Exec(user.Id, user.UserHandle, user.DisplayName)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 		}
@@ -406,6 +462,7 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 			parsedSignature.Response.Transports,
 			parsedSignature.Response.AttestationObject.AuthData.Flags,
 			parsedSignature.Response.AttestationObject.AuthData.AttData.AAGUID,
+			user.Id,
 		)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
@@ -416,15 +473,15 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 			Issuer:    "pesan-backend",
-			Subject:   marshaledUser.UserHandle,
+			Subject:   user.UserHandle,
 			ID:        uuid.New().String(),
 			Audience:  []string{"seller"},
 		}
 
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
 		var accessToken string
-		// TODO: use secret
-		accessToken, err = token.SignedString("secret123")
+		accessToken, err = token.SignedString(apiSecret)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 		}
@@ -432,8 +489,8 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 		var totalPasskeys uint32 = 1
 		return &stub.UserSession{
 			AccessToken:  accessToken,
-			UserHandle:   marshaledUser.UserHandle,
-			DisplayName:  marshaledUser.DisplayName,
+			UserHandle:   user.UserHandle,
+			DisplayName:  user.DisplayName,
 			TotalPasskey: &totalPasskeys,
 		}, nil
 	case http.StatusBadRequest:
@@ -443,6 +500,52 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 	case http.StatusFailedDependency:
 		return nil, status.Error(codes.FailedPrecondition, string(body))
 	default:
-		return nil, status.Error(codes.Internal, "[ERROR] unable to verify public key")
+		return nil, status.Error(codes.Internal, string(body))
 	}
+}
+
+// NOTE: core/attest/discover
+func (s *pesanServer) DiscoverLogin(ctx context.Context, _ *emptypb.Empty) (*stub.AttestSession, error) {
+	assertation, session, err := wbAuthn.BeginDiscoverableMediatedLogin(protocol.MediationConditional)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	err = cacheAttestSession(ctx, *session)
+	if err != nil {
+		return nil, err
+	}
+
+	var options []byte
+	options, err = json.Marshal(assertation.Response)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	return &stub.AttestSession{
+		Challenge:  options,
+		ValidUntil: timestamppb.New(session.Expires),
+	}, nil
+}
+
+// NOTE: core/attest/verify
+func (s *pesanServer) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPublicKeyRequest) (*stub.UserSession, error) {
+	//data, err := protocol.ParseCredentialRequestResponseBytes(r.Signed)
+	//if err != nil {
+	//	return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	//}
+
+	//_, err = getCachedAttestSession(ctx, data.Response.CollectedClientData.Challenge)
+	//if err != nil {
+	//	return nil, err
+	//}
+
+	//verifyLink := fmt.Sprintf("http://localhost:3000/public-key/attest/%v", data.Response.CollectedClientData.Challenge)
+	//var res *http.Response
+	//res, err = http.Post(verifyLink, "application/json", bytes.NewBuffer(r.Signed))
+	//if err != nil {
+	//	return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	//}
+
+	return nil, status.Error(codes.Canceled, "[INFO] wip")
 }
