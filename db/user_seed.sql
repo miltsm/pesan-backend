@@ -27,6 +27,7 @@ CREATE TABLE passkeys (
 	transport text[],
 	flags jsonb,
 	authenticator_aaguid bytea,
+	sign_count integer DEFAULT 0,
 	created_at timestamp DEFAULT LOCALTIMESTAMP,
 	updated_at timestamp DEFAULT LOCALTIMESTAMP,
 	user_id uuid not null REFERENCES users ON DELETE CASCADE
@@ -37,6 +38,7 @@ BEFORE UPDATE ON passkeys
 FOR EACH ROW
 EXECUTE FUNCTION update_timestamp();
 
+-- one of the alternative to replace redis, but discarded
 CREATE UNLOGGED TABLE passkey_sessions (
 	user_handle varchar(80) PRIMARY KEY UNIQUE NOT NULL,
 	temp_user jsonb,
@@ -44,14 +46,66 @@ CREATE UNLOGGED TABLE passkey_sessions (
 	expires_at timestamp
 );
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE OR REPLACE FUNCTION hash_password()
+RETURNS trigger AS $$
+BEGIN
+	NEW.hashed = crypt(NEW.hashed, gen_salt('bf', 10));
+	RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TABLE passwords (
 	password_id uuid PRIMARY KEY NOT NULL DEFAULT uuid_generate_v4(),
 	hashed text NOT NULL,
 	created_at timestamp DEFAULT LOCALTIMESTAMP,
-	updated_at timestamp DEFAULT LOCALTIMESTAMP
+	updated_at timestamp DEFAULT LOCALTIMESTAMP,
+	user_id uuid UNIQUE NOT NULL REFERENCES users ON DELETE CASCADE
 );
+
+CREATE TRIGGER before_insert_passwords
+BEFORE INSERT ON passwords
+FOR EACH ROW
+EXECUTE FUNCTION hash_password();
 
 CREATE TRIGGER update_password_timestamp
 BEFORE UPDATE ON passwords
 FOR EACH ROW
 EXECUTE FUNCTION update_timestamp();
+
+CREATE VIEW user_passkeys AS
+SELECT
+	u.user_id,
+	u.user_handle,
+	u.display_name,
+	p.passkey_id,
+	p.public_key,
+	p.attestation_type,
+	p.transport,
+	p.flags,
+	p.authenticator_aaguid,
+	p.sign_count,
+	p.created_at
+FROM
+	users u
+LEFT JOIN
+	passkeys p ON u.user_id = p.user_id;
+
+CREATE VIEW user_profile AS
+SELECT
+	up.user_id, 
+	up.user_handle, 
+	up.display_name, 
+	COUNT(up.passkey_id) AS passkey_count, 
+	pw.updated_at AS last_password_updated_at
+FROM
+	user_passkeys up 
+LEFT JOIN
+	passwords pw ON up.user_id = pw.user_id
+GROUP BY
+	up.user_id,
+	up.user_handle,
+	up.display_name,
+	up.passkey_id, 
+	pw.updated_at;
