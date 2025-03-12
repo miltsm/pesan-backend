@@ -668,21 +668,16 @@ func (s *pesanServer) OnboardWithPassword(ctx context.Context, r *stub.OnboardRe
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] 0symbol")
 	}
 
-	var user User
-	err := statements[ReadAnUserByHandle].QueryRow(r.UserHandle).Scan(&user.Id, &user.UserHandle, &user.DisplayName)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, status.Error(codes.AlreadyExists, "[ERROR] user already exists with the given handle")
-		} else {
-			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
-		}
-	}
-
 	newId := uuid.New()
 
-	_, err = statements[CreateAnUser].Exec(newId, r.UserHandle, displayName)
+	_, err := statements[CreateAnUser].Exec(newId, r.UserHandle, displayName)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "[ERROR] unable to create user:\n%v", err)
+		if strings.ContainsAny(err.Error(), "SQLSTATE 23505") {
+			return nil, status.Error(codes.AlreadyExists, "[ERROR] user already exists with the given handle")
+		} else {
+
+			return nil, status.Errorf(codes.Internal, "[ERROR] unable to create user:\n%v", err)
+		}
 	}
 
 	_, err = statements[CreateAPassword].Exec(newPassword, newId)
