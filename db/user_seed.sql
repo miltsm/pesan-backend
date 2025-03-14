@@ -3,14 +3,14 @@ CREATE TABLE users (
 	user_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
 	user_handle varchar(80) NOT NULL UNIQUE,
 	display_name varchar(80),
-	created_at timestamp DEFAULT LOCALTIMESTAMP,
-	updated_at timestamp DEFAULT LOCALTIMESTAMP
+	created_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE OR REPLACE FUNCTION update_timestamp()
 RETURNS TRIGGER AS $$
 BEGIN
-	New.updated_at = LOCALTIMESTAMP;
+	New.updated_at = CURRENT_TIMESTAMP;
 	RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -28,9 +28,9 @@ CREATE TABLE passkeys (
 	flags jsonb,
 	authenticator_aaguid bytea,
 	sign_count integer DEFAULT 0,
-	created_at timestamp DEFAULT LOCALTIMESTAMP,
-	updated_at timestamp DEFAULT LOCALTIMESTAMP,
-	user_id uuid not null REFERENCES users ON DELETE CASCADE
+	created_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE
 );
 
 CREATE TRIGGER update_passkey_timestamp
@@ -59,8 +59,8 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE passwords (
 	password_id uuid PRIMARY KEY NOT NULL DEFAULT uuid_generate_v4(),
 	hashed text NOT NULL,
-	created_at timestamp DEFAULT LOCALTIMESTAMP,
-	updated_at timestamp DEFAULT LOCALTIMESTAMP,
+	created_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 	user_id uuid UNIQUE NOT NULL REFERENCES users ON DELETE CASCADE
 );
 
