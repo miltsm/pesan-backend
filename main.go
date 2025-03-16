@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+
 	"strings"
 
 	"time"
@@ -14,7 +16,10 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/golang-jwt/jwt/v5"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
@@ -22,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 
 	"google.golang.org/grpc/status"
 )
@@ -63,7 +69,7 @@ func main() {
 		db.Close()
 		return
 	}
-	srv := grpc.NewServer(grpc.UnaryInterceptor(logInterceptor))
+	srv := grpc.NewServer(grpc.UnaryInterceptor(unaryInterceptor))
 	stub.RegisterPesanServer(srv, newServer())
 
 	fmt.Printf("[INFO] listening to port: %d..\n", port)
@@ -84,14 +90,61 @@ func extractSecrets() {
 	}
 }
 
-// NOTE: core - INTERCEPTORS
-func logInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	log.Printf("[INFO] Method: %s, Request: %v", info.FullMethod, req)
+// NOTE: core - INTERCEPTOR
+func unaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+
+	log.Printf("[INFO] Method: %s", info.FullMethod)
+	serviceName := "/pesan.Pesan"
+
+	switch info.FullMethod {
+	case fmt.Sprintf("%s/OnboardWithPublicKey", serviceName):
+	case fmt.Sprintf("%s/VerifyPublicKeyAndOnboard", serviceName):
+	case fmt.Sprintf("%s/OnboardWithPassword", serviceName):
+	case fmt.Sprintf("%s/DiscoverLogin", serviceName):
+	case fmt.Sprintf("%s/VerifyPublicKeyLogin", serviceName):
+	case fmt.Sprintf("%s/LoginWithPassword", serviceName):
+	default:
+		// NOTE: Auth
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "[WARN] missing metadata")
+		}
+
+		authHeader := md["authorization"]
+		if len(authHeader) < 1 {
+			return nil, status.Errorf(codes.InvalidArgument, "[WARN] missing authorisation")
+		}
+
+		accessToken := strings.TrimPrefix(authHeader[0], "Bearer ")
+
+		parsedToken, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
+			return []byte(apiSecret), nil
+		})
+
+		switch {
+		case parsedToken.Valid:
+		case errors.Is(err, jwt.ErrTokenMalformed):
+			return nil, status.Error(codes.InvalidArgument, "[WARN] not a token")
+		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+			return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid token signature")
+		case errors.Is(err, jwt.ErrTokenExpired):
+			return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session expired")
+		case errors.Is(err, jwt.ErrTokenNotValidYet):
+			return nil, status.Error(codes.InvalidArgument, "[WARN] token yet valid")
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "[ERROR] couldnt handle this token: %v", err)
+		}
+
+	}
+
+	// NOTE: Logger
+	log.Printf("[INFO] Request: %v", req)
 	resp, err := handler(ctx, req)
 	if err != nil {
 		log.Printf("[ERROR] %v", err)
 	}
 	log.Printf("[INFO] %v", resp)
+
 	return resp, err
 }
 
@@ -102,9 +155,12 @@ const (
 	CreateAnUser StatementKey = iota
 	ReadAnUserByHandle
 	ReadAnUserProfile
+	ReadAnUserProfileByCredentialId
 	CreateAPublicKey
 	CreateAPassword
 	ReadAPassword
+	CreateAShop
+	ReadShops
 	CreateProduct
 	CreateCategory
 	UpdateCategory
@@ -162,11 +218,18 @@ func prepareStatements() {
 		`,
 		ReadAnUserProfile: `
 			SELECT
-				user_handle, display_name, passkey_count, last_password_updated_at
+				user_id, user_handle, display_name, passkey_count, last_password_updated_at
 			FROM
-				user_profile
+				user_profiles
 			WHERE
-				user_handle = $1 or user_id::text = $1
+				user_handle = $1 or user_id::text = $1		`,
+		ReadAnUserProfileByCredentialId: `	
+			SELECT
+				user_id, user_handle, display_name, passkey_count, last_password_updated_at
+			FROM
+				user_profiles
+			WHERE
+				passkey_id = $1
 		`,
 		CreateAPublicKey: `
 			INSERT INTO
@@ -189,8 +252,22 @@ func prepareStatements() {
 			FROM
 				passwords
 			WHERE
-				hashed = crypt($1, hashed)
-			
+				hashed = crypt($1, hashed)	
+		`,
+		CreateAShop: `
+			INSERT INTO
+				shops(name, description, open_hour, closing_hour, contacts, weekly_availability, gmap_link_or_coordinate)
+			VALUES
+				($1, $2, $3, $4, $5, $6, $7)
+		`,
+		ReadShops: `
+			SELECT
+				shop_id, name, description, open_hour, closing_hour, contacts, weekly_availability, gmap_link_or_coordinate, updated_at
+			FROM
+				shops
+			WHERE
+				user_id = $1
+			LIMIT 1
 		`,
 		//CreateProduct: `INSERT INTO products(product_id, name, description, unit, price) VALUES( $1, $2, $3, $4, $5)`,
 		//// client will provide id on their side for an easy sync and redundant API refresh
@@ -342,6 +419,11 @@ func configureWebAuthn() {
 				TimeoutUVD: time.Second * PASSKEY_DURATION,
 			},
 		},
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			RequireResidentKey: protocol.ResidentKeyRequired(),
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+		},
+		Debug: true,
 	}
 
 	var err error

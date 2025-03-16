@@ -6,35 +6,29 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"regexp"
 	"strings"
-
-	"net/http"
-
 	"time"
 
-	"fmt"
-
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
-
 	"google.golang.org/grpc/codes"
-
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 )
 
 const (
 	// NOTE: 1 minute per assert & attest session
 	PASSKEY_DURATION = 60
-	// NOTE: 1 day lifespan for passkey sign up & login
+	// NOTE: 5 minutes lifespan for passkey sign up & login
 	JWT_LIFESPAN = 5 * 60
 )
 
@@ -155,30 +149,9 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 			return nil, status.Errorf(codes.FailedPrecondition, "[ERROR] session corrupted. unable to unmarshal user\n%v", err)
 		}
 
-		// NOTE: might be better for client sent a similar indicator within request header
-		//		clientMode := os.Getenv("CLIENT_MODE")
-		//		if clientMode != "dev" {
-		_, err = statements[CreateAnUser].Exec(user.Id, user.UserHandle, user.DisplayName)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
-		}
-
-		_, err = statements[CreateAPublicKey].Exec(
-			parsedSignature.Raw.Credential.ID,
-			parsedSignature.Raw.AttestationResponse.PublicKey,
-			parsedSignature.Type,
-			parsedSignature.Response.Transports,
-			parsedSignature.Response.AttestationObject.AuthData.Flags,
-			parsedSignature.Response.AttestationObject.AuthData.AttData.AAGUID,
-			user.Id,
-		)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
-		}
-		//		}
-
+		claimsExpiresAt := time.Now().Add(JWT_LIFESPAN * time.Second)
 		claims := jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(JWT_LIFESPAN * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(claimsExpiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 			Issuer:    "pesan-backend",
@@ -197,10 +170,11 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 
 		var totalPasskeys uint32 = 1
 		return &stub.UserSession{
-			AccessToken:  []byte(accessToken),
-			UserHandle:   user.UserHandle,
-			DisplayName:  user.DisplayName,
-			TotalPasskey: &totalPasskeys,
+			AccessToken:          []byte(accessToken),
+			UserHandle:           user.UserHandle,
+			DisplayName:          user.DisplayName,
+			TotalPasskey:         &totalPasskeys,
+			AccessTokenExpiresAt: timestamppb.New(claimsExpiresAt),
 		}, nil
 	case http.StatusBadRequest:
 		return nil, status.Error(codes.InvalidArgument, string(body))
@@ -268,21 +242,17 @@ func (s *pesanServer) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPu
 	case http.StatusAccepted:
 
 		var userId uuid.UUID
-		userId, err = uuid.FromBytes(body)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
-		}
-
 		var userHandle, displayName string
 		var totalPasskeys uint32
 		var lastPasswordUpdated sql.NullTime
-		err = statements[ReadAnUserProfile].QueryRow(userId).Scan(&userHandle, &displayName, &totalPasskeys, &lastPasswordUpdated)
+		err = statements[ReadAnUserProfileByCredentialId].QueryRow(body).Scan(&userId, &userHandle, &displayName, &totalPasskeys, &lastPasswordUpdated)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 		}
 
+		claimsExpiresAt := time.Now().Add(JWT_LIFESPAN * time.Second)
 		claims := jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(JWT_LIFESPAN * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(claimsExpiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 			Issuer:    "pesan-backend",
@@ -300,10 +270,11 @@ func (s *pesanServer) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPu
 		}
 
 		return &stub.UserSession{
-			AccessToken:  []byte(accessToken),
-			UserHandle:   userHandle,
-			DisplayName:  displayName,
-			TotalPasskey: &totalPasskeys,
+			AccessToken:          []byte(accessToken),
+			UserHandle:           userHandle,
+			DisplayName:          displayName,
+			TotalPasskey:         &totalPasskeys,
+			AccessTokenExpiresAt: timestamppb.New(claimsExpiresAt),
 		}, nil
 	case http.StatusBadRequest:
 		return nil, status.Error(codes.InvalidArgument, string(body))
@@ -360,8 +331,9 @@ func (s *pesanServer) OnboardWithPassword(ctx context.Context, r *stub.OnboardRe
 		return nil, status.Errorf(codes.Internal, "[ERROR] unable to create password:\n%v", err)
 	}
 
+	claimsExpiresAt := time.Now().Add(JWT_LIFESPAN * time.Second)
 	claims := jwt.RegisteredClaims{
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(JWT_LIFESPAN * time.Minute)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(JWT_LIFESPAN * time.Second)),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
 		NotBefore: jwt.NewNumericDate(time.Now()),
 		Issuer:    "pesan-backend",
@@ -385,11 +357,12 @@ func (s *pesanServer) OnboardWithPassword(ctx context.Context, r *stub.OnboardRe
 
 	var totalPasskeys uint32 = 0
 	return &stub.UserSession{
-		AccessToken:  []byte(accessToken),
-		RefreshToken: refreshToken,
-		UserHandle:   r.UserHandle,
-		DisplayName:  displayName,
-		TotalPasskey: &totalPasskeys,
+		AccessToken:          []byte(accessToken),
+		RefreshToken:         refreshToken,
+		UserHandle:           r.UserHandle,
+		DisplayName:          displayName,
+		TotalPasskey:         &totalPasskeys,
+		AccessTokenExpiresAt: timestamppb.New(claimsExpiresAt),
 	}, nil
 
 }
@@ -412,7 +385,7 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 	var user User
 	var totalPasskey uint32
 	var lastPwdUpdated sql.NullTime
-	err = statements[ReadAnUserProfile].QueryRow(r.UserHandle).Scan(&user.UserHandle, &user.DisplayName, &totalPasskey, &lastPwdUpdated)
+	err = statements[ReadAnUserProfile].QueryRow(r.UserHandle).Scan(&user.Id, &user.UserHandle, &user.DisplayName, &totalPasskey, &lastPwdUpdated)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, status.Error(codes.NotFound, "[ERROR] user not found")
@@ -420,8 +393,9 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
+	claimsExpiresAt := time.Now().Add(JWT_LIFESPAN * time.Second)
 	claims := jwt.RegisteredClaims{
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(JWT_LIFESPAN * time.Minute)),
+		ExpiresAt: jwt.NewNumericDate(claimsExpiresAt),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
 		NotBefore: jwt.NewNumericDate(time.Now()),
 		Issuer:    "pesan-backend",
@@ -439,11 +413,12 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 	}
 
 	return &stub.UserSession{
-		AccessToken:         []byte(accessToken),
-		UserHandle:          user.UserHandle,
-		DisplayName:         user.DisplayName,
-		TotalPasskey:        &totalPasskey,
-		LastPasswordUpdated: timestamppb.New(lastPwdUpdated.Time),
+		AccessToken:          []byte(accessToken),
+		UserHandle:           user.UserHandle,
+		DisplayName:          user.DisplayName,
+		TotalPasskey:         &totalPasskey,
+		LastPasswordUpdated:  timestamppb.New(lastPwdUpdated.Time),
+		AccessTokenExpiresAt: timestamppb.New(claimsExpiresAt),
 	}, nil
 
 }

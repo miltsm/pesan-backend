@@ -92,11 +92,12 @@ FROM
 LEFT JOIN
 	passkeys p ON u.user_id = p.user_id;
 
-CREATE VIEW user_profile AS
+CREATE VIEW user_profiles AS
 SELECT
 	up.user_id, 
 	up.user_handle, 
 	up.display_name, 
+	up.passkey_id,
 	COUNT(up.passkey_id) AS passkey_count, 
 	pw.updated_at AS last_password_updated_at
 FROM
@@ -109,3 +110,24 @@ GROUP BY
 	up.display_name,
 	up.passkey_id, 
 	pw.updated_at;
+
+CREATE TYPE open_day AS ENUM ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday');
+
+CREATE TABLE shops (
+	shop_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+	name varchar(80) NOT NULL,
+	description varchar(80),
+	open_hour time WITH TIME ZONE NOT NULL DEFAULT '08:30',
+	closing_hour time WITH TIME ZONE NOT NULL DEFAULT '21:30',
+	contacts text[],	
+	weekly_availability open_day[] NOT NULL DEFAULT ARRAY['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']::open_day[],
+	gmap_link_or_coordinate text,
+	customer_order_key text,
+	auto_re_stock_next_day boolean DEFAULT true,
+	order_distance integer DEFAULT 100, -- 100 meter from seller shop
+	logo_url text,
+	banner_img_url text,
+	created_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE 
+);
