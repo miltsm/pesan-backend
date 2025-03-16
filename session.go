@@ -297,6 +297,8 @@ func (s *pesanServer) OnboardWithPassword(ctx context.Context, r *stub.OnboardRe
 	var displayName string
 	if r.DisplayName == nil || len(*r.DisplayName) == 0 {
 		displayName = r.UserHandle
+	} else {
+		displayName = *r.DisplayName
 	}
 
 	newPassword := string(r.NewPassword)
@@ -377,7 +379,8 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 		return nil, status.Error(codes.InvalidArgument, "[WARN] password can't be empty")
 	}
 
-	_, err := statements[ReadAPassword].Exec(r.Password)
+	var hashedPw string
+	err := statements[ReadAPassword].QueryRow(r.Password).Scan(&hashedPw)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "[WARN] combination doesn't match")
 	}
