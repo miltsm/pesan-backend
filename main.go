@@ -19,6 +19,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -35,11 +36,13 @@ import (
 // NOTE: core - APPLICATION
 // *this is for an nvim easy jump; consider it as table of contents
 var (
-	db         *sql.DB
-	statements map[StatementKey]*sql.Stmt
-	cache      *redis.Client
-	wbAuthn    *webauthn.WebAuthn
-	apiSecret  []byte
+	port, dbPort, cachePort                                int
+	db                                                     *sql.DB
+	statements                                             map[StatementKey]*sql.Stmt
+	cache                                                  *redis.Client
+	wbAuthn                                                *webauthn.WebAuthn
+	accessSecret, refreshSecret                            []byte
+	passkeyDuration, accessJwtLifespan, refreshJwtLifespan int
 )
 
 type pesanServer struct {
@@ -51,19 +54,14 @@ func newServer() *pesanServer {
 }
 
 func main() {
-	extractSecrets()
+	setEnvs()
 	establishDb()
 	prepareStatements()
 	establishRedis()
 	configureWebAuthn()
 
-	port, err := strconv.ParseInt(os.Getenv("PORT"), 10, 32)
-	if err != nil {
-		log.Fatalf("[WARN] %s", err.Error())
-		port = 50051
-	}
 	var lis net.Listener
-	lis, err = net.Listen("tcp", fmt.Sprintf("%s:%d", os.Getenv("HOST"), port))
+	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", os.Getenv("HOST"), port))
 	if err != nil {
 		log.Fatalf("[FATAL] %s\n", err.Error())
 		db.Close()
@@ -81,9 +79,50 @@ func main() {
 }
 
 // NOTE: core - CONFIG
-func extractSecrets() {
+func setEnvs() {
 	var err error
-	apiSecret, err = os.ReadFile(os.Getenv("JWT_SECRET_PATH"))
+
+	port, err = strconv.Atoi(os.Getenv("PORT"))
+	if err != nil {
+		log.Fatalf("[WARN] %s", err.Error())
+		port = 50051
+	}
+
+	dbPort, err = strconv.Atoi(os.Getenv("POSTGRES_PORT"))
+	if err != nil {
+		log.Fatalf("[WARN] %v", err)
+		dbPort = 5432
+	}
+
+	cachePort, err = strconv.Atoi(os.Getenv("RDS_PORT"))
+	if err != nil {
+		log.Fatalf("[WARN] %v", err)
+		cachePort = 6379
+	}
+
+	accessJwtLifespan, err = strconv.Atoi(os.Getenv("ACCESS_JWT_LIFESPAN"))
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+
+	refreshJwtLifespan, err = strconv.Atoi(os.Getenv("REFRESH_JWT_LIFESPAN"))
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+	fmt.Printf("[DEBUG] refresh token ends in %d minutes\n", refreshJwtLifespan)
+
+	passkeyDuration, err = strconv.Atoi(os.Getenv("PASSKEY_DURATION"))
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+
+	accessSecret, err = os.ReadFile(os.Getenv("ACCESS_SECRET_PATH"))
+	if err != nil {
+		log.Fatalf("[FATAL] %v", err)
+		return
+	}
+
+	refreshSecret, err = os.ReadFile(os.Getenv("REFRESH_SECRET_PATH"))
 	if err != nil {
 		log.Fatalf("[FATAL] %v", err)
 		return
@@ -107,32 +146,56 @@ func unaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, 
 		// NOTE: Auth
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "[WARN] missing metadata")
+			err := status.Errorf(codes.PermissionDenied, "[WARN] missing metadata")
+			log.Println(err)
+			return nil, err
 		}
 
 		authHeader := md["authorization"]
 		if len(authHeader) < 1 {
-			return nil, status.Errorf(codes.InvalidArgument, "[WARN] missing authorisation")
+			return nil, status.Errorf(codes.PermissionDenied, "[WARN] missing authorisation")
 		}
 
 		accessToken := strings.TrimPrefix(authHeader[0], "Bearer ")
 
-		parsedToken, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
-			return []byte(apiSecret), nil
+		parsedToken, err := jwt.Parse(accessToken, func(*jwt.Token) (interface{}, error) {
+			return []byte(accessSecret), nil
 		})
 
 		switch {
-		case parsedToken.Valid:
 		case errors.Is(err, jwt.ErrTokenMalformed):
-			return nil, status.Error(codes.InvalidArgument, "[WARN] not a token")
+			return nil, status.Error(codes.Unauthenticated, "[WARN] not a token")
 		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
-			return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid token signature")
+			return nil, status.Error(codes.Unauthenticated, "[ERROR] invalid token signature")
 		case errors.Is(err, jwt.ErrTokenExpired):
-			return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session expired")
+			switch info.FullMethod {
+			case fmt.Sprintf("%s/RefreshSession", serviceName), fmt.Sprintf("%s/ReAuth", serviceName), fmt.Sprintf("%s/VerifyPublicKeyReAuth", serviceName):
+				var userIdStr string
+				if userIdStr, err = parsedToken.Claims.GetSubject(); err != nil {
+					return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+				}
+				var userId uuid.UUID
+				if userId, err = uuid.Parse(userIdStr); err != nil {
+					return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
+				}
+				ctx = context.WithValue(ctx, "user_id", userId)
+			default:
+				return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session expired")
+			}
 		case errors.Is(err, jwt.ErrTokenNotValidYet):
-			return nil, status.Error(codes.InvalidArgument, "[WARN] token yet valid")
+			return nil, status.Error(codes.Unavailable, "[WARN] token yet valid")
+		case parsedToken.Valid:
+			var userIdStr string
+			if userIdStr, err = parsedToken.Claims.GetSubject(); err != nil {
+				return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+			}
+			var userId uuid.UUID
+			if userId, err = uuid.Parse(userIdStr); err != nil {
+				return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
+			}
+			ctx = context.WithValue(ctx, "user_id", userId)
 		default:
-			return nil, status.Errorf(codes.InvalidArgument, "[ERROR] couldnt handle this token: %v", err)
+			return nil, status.Errorf(codes.Unauthenticated, "[ERROR] couldnt handle this token: %v", err)
 		}
 
 	}
@@ -156,7 +219,9 @@ const (
 	ReadAnUserByHandle
 	ReadAnUserProfile
 	ReadAnUserProfileByCredentialId
+	ReadAnUserWithPasskeys
 	CreateAPublicKey
+	UpdateAPublicKey
 	CreateAPassword
 	ReadAPassword
 	CreateAShop
@@ -168,15 +233,7 @@ const (
 )
 
 func establishDb() {
-	var pgPort int64
-	var pwd []byte
-	pgPort, err := strconv.ParseInt(os.Getenv("POSTGRES_PORT"), 10, 32)
-
-	if err != nil {
-		fmt.Printf("[WARN] %v\n", err)
-		pgPort = 5432
-	}
-	pwd, err = os.ReadFile(os.Getenv("POSTGRES_PASSWORD_FILE"))
+	pwd, err := os.ReadFile(os.Getenv("POSTGRES_PASSWORD_FILE"))
 	if err != nil {
 		log.Fatalf("[FATAL] %v\n", err)
 		return
@@ -185,7 +242,7 @@ func establishDb() {
 		os.Getenv("POSTGRES_USER"),
 		pwd,
 		os.Getenv("POSTGRES_HOST"),
-		pgPort,
+		dbPort,
 		os.Getenv("POSTGRES_DB"))
 
 	db, err = sql.Open("pgx", dsn)
@@ -218,7 +275,7 @@ func prepareStatements() {
 		`,
 		ReadAnUserProfile: `
 			SELECT
-				user_id, user_handle, display_name, passkey_count, last_password_updated_at
+				user_id, user_handle, display_name, passkey_count
 			FROM
 				user_profiles
 			WHERE
@@ -231,10 +288,34 @@ func prepareStatements() {
 			WHERE
 				passkey_id = $1
 		`,
+		ReadAnUserWithPasskeys: `	
+			SELECT  
+				user_handle,	
+				display_name,
+				passkey_id,
+				public_key,
+				attestation_type,
+				transport,
+				flags,
+				authenticator_aaguid,
+				sign_count
+			FROM 
+				user_passkeys
+			WHERE 
+				user_id = $1
+		`,
 		CreateAPublicKey: `
 			INSERT INTO
 				passkeys(passkey_id, public_key, attestation_type, transport, flags, authenticator_aaguid, user_id)
 			VALUES( $1, $2, $3, $4, $5, $6, $7)
+		`,
+		UpdateAPublicKey: `
+		UPDATE 
+			passkeys
+		SET
+			attestation_type = $1, transport = $2, flags = $3, sign_count = $4
+		WHERE
+			passkey_id = $5	
 		`,
 		CreateAPassword: `
 			INSERT INTO
@@ -247,22 +328,22 @@ func prepareStatements() {
 				hashed = EXCLUDED.hashed;
 		`,
 		ReadAPassword: `
-			SELECT
-				updated_at
-			FROM
-				passwords
-			WHERE
-				hashed = crypt($1, hashed)	
+		SELECT
+			updated_at
+		FROM
+			passwords
+		WHERE
+			user_id::text = $1 AND hashed = crypt($2, hashed)	
 		`,
 		CreateAShop: `
-			INSERT INTO
-				shops(name, description, open_hour, closing_hour, contacts, weekly_availability, gmap_link_or_coordinate)
-			VALUES
-				($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO
+			shops(shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, locations, user_id)
+		VALUES
+			($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`,
 		ReadShops: `
 			SELECT
-				shop_id, name, description, open_hour, closing_hour, contacts, weekly_availability, gmap_link_or_coordinate, updated_at
+				shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, locations, updated_at
 			FROM
 				shops
 			WHERE
@@ -304,24 +385,20 @@ func prepareStatements() {
 // NOTE: core - CACHE
 
 // NOTE: might need to cache credentials, just incase user request on another device
-type OnboardCache struct {
+type SessionCache struct {
 	User    User                 `json:"user"`
 	Session webauthn.SessionData `json:"session"`
 }
 
 func establishRedis() {
-	rdHost, rdPort := os.Getenv("RDS_HOST"), os.Getenv("RDS_PORT")
+	rdHost := os.Getenv("RDS_HOST")
 	if len(rdHost) == 0 {
 		fmt.Println("[WARN] redis host isn't specified!")
 		rdHost = "core-cache"
 	}
-	if len(rdPort) == 0 {
-		fmt.Println("[WARN] redis port isn't specified!")
-		rdPort = "6379"
-	}
 
 	cache = redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%s", rdHost, rdPort),
+		Addr:     fmt.Sprintf("%s:%d", rdHost, cachePort),
 		Password: "",
 		DB:       0,
 		Protocol: 2,
@@ -333,7 +410,7 @@ func establishRedis() {
 func cacheAssertSession(ctx context.Context, session *webauthn.SessionData, user *User) error {
 	key := fmt.Sprintf("asserts:%s", session.Challenge)
 
-	cacheData := &OnboardCache{
+	cacheData := &SessionCache{
 		Session: *session,
 		User:    *user,
 	}
@@ -398,6 +475,46 @@ func getCachedDiscoverableSessionFromAttestSession(ctx context.Context, challeng
 	return &res, nil
 }
 
+func checkTotalReAuthAttempts(ctx context.Context, userId uuid.UUID) error {
+	attemptKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
+	totalAttemptsStr, err := cache.Get(ctx, attemptKey).Result()
+	if err != nil {
+		return status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+	var totalAttempts int64
+	if totalAttempts, err = strconv.ParseInt(totalAttemptsStr, 10, 8); err != nil {
+		return status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+	if totalAttempts > 3 {
+		return status.Error(codes.PermissionDenied, "[ERROR] reauth maxed; please login back")
+	}
+	return nil
+}
+
+func incrReAuthCounter(ctx context.Context, userId uuid.UUID, expiresAt time.Time) error {
+	cacheKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
+	_, err := cache.Incr(ctx, cacheKey).Result()
+	if err != nil {
+		return err
+	}
+	var ok bool
+	if ok, err = cache.ExpireAt(ctx, cacheKey, expiresAt).Result(); err != nil {
+		return err
+	}
+	if !ok {
+		return status.Errorf(codes.Internal, "[ERROR] unable to cache reauth session")
+	}
+	return nil
+}
+
+func clearReAuthCache(ctx context.Context, userId uuid.UUID) {
+	attemptKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
+	cache.Del(ctx, attemptKey).Result()
+
+	cacheKey := fmt.Sprintf("reauths:%s", userId.String())
+	cache.JSONDel(ctx, cacheKey, "$")
+}
+
 // NOTE: core - WEBAUTHN
 func configureWebAuthn() {
 	androidOrigin, webHost := fmt.Sprintf("android:apk-key-hash:%s", os.Getenv("ANDROID_KEY_HASH")), os.Getenv("WBAUTHN_RP_ID")
@@ -410,13 +527,13 @@ func configureWebAuthn() {
 		Timeouts: webauthn.TimeoutsConfig{
 			Login: webauthn.TimeoutConfig{
 				Enforce:    true,
-				Timeout:    time.Second * PASSKEY_DURATION,
-				TimeoutUVD: time.Second * PASSKEY_DURATION,
+				Timeout:    time.Second * time.Duration(passkeyDuration),
+				TimeoutUVD: time.Second * time.Duration(passkeyDuration),
 			},
 			Registration: webauthn.TimeoutConfig{
 				Enforce:    true,
-				Timeout:    time.Second * PASSKEY_DURATION,
-				TimeoutUVD: time.Second * PASSKEY_DURATION,
+				Timeout:    time.Second * time.Duration(passkeyDuration),
+				TimeoutUVD: time.Second * time.Duration(passkeyDuration),
 			},
 		},
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
