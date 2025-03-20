@@ -116,13 +116,13 @@ CREATE TYPE open_day AS ENUM ('monday', 'tuesday', 'wednesday', 'thursday', 'fri
 CREATE TABLE shops (
 	shop_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
 	name varchar(80) NOT NULL,
-	description varchar(80),
+	tags text[],
 	open_hour time WITH TIME ZONE NOT NULL DEFAULT '08:30',
 	closing_hour time WITH TIME ZONE NOT NULL DEFAULT '21:30',
 	contacts text[],	
-	weekly_availability open_day[] NOT NULL DEFAULT ARRAY['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']::open_day[],
-	gmap_link_or_coordinate text,
-	customer_order_key text,
+	operation_days open_day[] NOT NULL DEFAULT ARRAY['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']::open_day[],
+	locations text[],
+	customer_order_keys text[],
 	auto_re_stock_next_day boolean DEFAULT true,
 	order_distance integer DEFAULT 100, -- 100 meter from seller shop
 	logo_url text,
@@ -130,4 +130,19 @@ CREATE TABLE shops (
 	created_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 	updated_at timestamp WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE 
+);
+
+CREATE TABLE roles (
+	role_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+	can_edit_shop boolean DEFAULT false,
+	can_delete_shop boolean DEFAULT false,
+	can_open_close_shop boolean DEFAULT false,
+	can_create_product boolean DEFAULT false,
+	can_edit_product boolean DEFAULT false,
+	can_delete_product boolean DEFAULT false,
+	can_create_order boolean DEFAULT false,
+	can_edit_order boolean DEFAULT false,
+	created_by uuid NOT NULL REFERENCES users,
+	user_id uuid NOT NULL UNIQUE REFERENCES users ON DELETE CASCADE,
+	shop_id uuid NOT NULL UNIQUE REFERENCES shops ON DELETE CASCADE
 );
