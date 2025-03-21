@@ -109,7 +109,6 @@ func setEnvs() {
 	if err != nil {
 		log.Fatalf("[FATAL] %v", err)
 	}
-	fmt.Printf("[DEBUG] refresh token ends in %d minutes\n", refreshJwtLifespan)
 
 	passkeyDuration, err = strconv.Atoi(os.Getenv("PASSKEY_DURATION"))
 	if err != nil {
@@ -168,36 +167,33 @@ func unaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, 
 		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
 			return nil, status.Error(codes.Unauthenticated, "[ERROR] invalid token signature")
 		case errors.Is(err, jwt.ErrTokenExpired):
+			allowedMethods := []string{fmt.Sprintf("%s/RefreshSession", serviceName), fmt.Sprintf("%s/ReAuth", serviceName), fmt.Sprintf("%s/VerifyPublicKeyReAuth", serviceName), fmt.Sprintf("%s/ReAuthWithPassword", serviceName)}
 			switch info.FullMethod {
-			case fmt.Sprintf("%s/RefreshSession", serviceName), fmt.Sprintf("%s/ReAuth", serviceName), fmt.Sprintf("%s/VerifyPublicKeyReAuth", serviceName):
-				var userIdStr string
-				if userIdStr, err = parsedToken.Claims.GetSubject(); err != nil {
-					return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+			case allowedMethods[0], allowedMethods[1], allowedMethods[2], allowedMethods[3]:
+				var userId *uuid.UUID
+				userId, err = extractUserIdFromToken(parsedToken)
+				if err != nil {
+					return nil, err
 				}
-				var userId uuid.UUID
-				if userId, err = uuid.Parse(userIdStr); err != nil {
-					return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
+				ctx = context.WithValue(ctx, "user_id", *userId)
+				if strings.Compare(info.FullMethod, allowedMethods[2]) == 0 || strings.Compare(info.FullMethod, allowedMethods[3]) == 0 {
+					checkTotalReAuthAttempts(ctx, *userId)
 				}
-				ctx = context.WithValue(ctx, "user_id", userId)
 			default:
-				return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session expired")
+				return nil, status.Error(codes.Unauthenticated, "[ERROR] session expired")
 			}
 		case errors.Is(err, jwt.ErrTokenNotValidYet):
 			return nil, status.Error(codes.Unavailable, "[WARN] token yet valid")
 		case parsedToken.Valid:
-			var userIdStr string
-			if userIdStr, err = parsedToken.Claims.GetSubject(); err != nil {
-				return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+			var userId *uuid.UUID
+			userId, err = extractUserIdFromToken(parsedToken)
+			if err != nil {
+				return nil, err
 			}
-			var userId uuid.UUID
-			if userId, err = uuid.Parse(userIdStr); err != nil {
-				return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
-			}
-			ctx = context.WithValue(ctx, "user_id", userId)
+			ctx = context.WithValue(ctx, "user_id", *userId)
 		default:
 			return nil, status.Errorf(codes.Unauthenticated, "[ERROR] couldnt handle this token: %v", err)
 		}
-
 	}
 
 	// NOTE: Logger
@@ -209,6 +205,19 @@ func unaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, 
 	log.Printf("[INFO] %v", resp)
 
 	return resp, err
+}
+
+func extractUserIdFromToken(access *jwt.Token) (*uuid.UUID, error) {
+	userIdStr, err := access.Claims.GetSubject()
+	if err != nil {
+		return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+	}
+	var userId uuid.UUID
+	userId, err = uuid.Parse(userIdStr)
+	if err != nil {
+		return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
+	}
+	return &userId, nil
 }
 
 // NOTE: core - DATABASE
@@ -479,13 +488,15 @@ func checkTotalReAuthAttempts(ctx context.Context, userId uuid.UUID) error {
 	attemptKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
 	totalAttemptsStr, err := cache.Get(ctx, attemptKey).Result()
 	if err != nil {
+		// NOTE: fresh reattempt
+		return incrReAuthCounter(ctx, userId, time.Now().Add(time.Duration(passkeyDuration)*time.Second))
+	}
+	var totalAttempts int
+	if totalAttempts, err = strconv.Atoi(totalAttemptsStr); err != nil {
 		return status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
-	var totalAttempts int64
-	if totalAttempts, err = strconv.ParseInt(totalAttemptsStr, 10, 8); err != nil {
-		return status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-	if totalAttempts > 3 {
+	log.Printf("[INFO] total reauths attempts: %d\n", totalAttempts)
+	if totalAttempts > 2 {
 		return status.Error(codes.PermissionDenied, "[ERROR] reauth maxed; please login back")
 	}
 	return nil

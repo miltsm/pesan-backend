@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -9,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 
@@ -17,6 +17,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -54,6 +55,10 @@ func (u *User) WebAuthnDisplayName() string {
 
 func (u *User) WebAuthnCredentials() []webauthn.Credential {
 	return u.Credentials
+}
+
+func logError(line int, err error) {
+	log.Printf("[DEBUG]l%d: %v\n", line, err)
 }
 
 // NOTE: core-pk-assert-challenge
@@ -150,7 +155,12 @@ func (s *pesanServer) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Ver
 
 		var accessToken, refreshToken *string
 		var accessExpiry *time.Time
-		accessToken, refreshToken, accessExpiry, err = newTokens(user.Id)
+		accessToken, accessExpiry, err = newAccessToken(user.Id)
+		if err != nil {
+			return nil, err
+		}
+
+		refreshToken, err = newRefreshToken(user.Id)
 		if err != nil {
 			return nil, err
 		}
@@ -240,10 +250,16 @@ func (s *pesanServer) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPu
 
 		var accessToken, refreshToken *string
 		var accessExpiry *time.Time
-		accessToken, refreshToken, accessExpiry, err = newTokens(userId)
+		accessToken, accessExpiry, err = newAccessToken(userId)
 		if err != nil {
 			return nil, err
 		}
+
+		refreshToken, err = newRefreshToken(userId)
+		if err != nil {
+			return nil, err
+		}
+
 		return &stub.UserSession{
 			AccessToken:          []byte(*accessToken),
 			RefreshToken:         []byte(*refreshToken),
@@ -312,7 +328,12 @@ func (s *pesanServer) OnboardWithPassword(ctx context.Context, r *stub.OnboardRe
 
 	var accessToken, refreshToken *string
 	var accessExpiry *time.Time
-	accessToken, refreshToken, accessExpiry, err = newTokens(newId)
+	accessToken, accessExpiry, err = newAccessToken(newId)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err = newRefreshToken(newId)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +379,12 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 
 	var accessToken, refreshToken *string
 	var accessExpiry *time.Time
-	accessToken, refreshToken, accessExpiry, err = newTokens(user.Id)
+	accessToken, accessExpiry, err = newAccessToken(user.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err = newRefreshToken(user.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -374,8 +400,10 @@ func (s *pesanServer) LoginWithPassword(ctx context.Context, r *stub.PasswordLog
 	}, nil
 }
 
-func newTokens(userId uuid.UUID) (*string, *string, *time.Time, error) {
+func newAccessToken(userId uuid.UUID) (*string, *time.Time, error) {
 	accessExpiry := time.Now().Add(time.Duration(accessJwtLifespan) * time.Minute)
+	//log.Printf("[DEBUG] access ends: %v", accessExpiry)
+
 	claims := jwt.RegisteredClaims{
 		ExpiresAt: jwt.NewNumericDate(accessExpiry),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -390,12 +418,17 @@ func newTokens(userId uuid.UUID) (*string, *string, *time.Time, error) {
 
 	accessToken, err := token.SignedString(accessSecret)
 	if err != nil {
-		return nil, nil, nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+		return nil, nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
-	refreshExpiry := time.Now().Add(time.Duration(refreshJwtLifespan) * time.Minute)
+	return &accessToken, &accessExpiry, nil
+}
 
-	claims = jwt.RegisteredClaims{
+func newRefreshToken(userId uuid.UUID) (*string, error) {
+	refreshExpiry := time.Now().Add(time.Duration(refreshJwtLifespan) * time.Minute)
+	//log.Printf("[DEBUG] refresh ends: %v", refreshExpiry)
+
+	claims := jwt.RegisteredClaims{
 		ExpiresAt: jwt.NewNumericDate(refreshExpiry),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
 		NotBefore: jwt.NewNumericDate(time.Now()),
@@ -405,15 +438,13 @@ func newTokens(userId uuid.UUID) (*string, *string, *time.Time, error) {
 		Audience:  []string{"seller"},
 	}
 
-	token = jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-	var refreshToken string
-	refreshToken, err = token.SignedString(refreshSecret)
+	refreshToken, err := token.SignedString(refreshSecret)
 	if err != nil {
-		return nil, nil, nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
-
-	return &accessToken, &refreshToken, &accessExpiry, nil
+	return &refreshToken, nil
 }
 
 func (s *pesanServer) RefreshSession(ctx context.Context, r *stub.RefreshRequest) (*stub.RefreshReply, error) {
@@ -428,13 +459,12 @@ func (s *pesanServer) RefreshSession(ctx context.Context, r *stub.RefreshRequest
 	switch {
 	case parsedToken.Valid:
 		userId := ctx.Value("user_id").(uuid.UUID)
-		accessToken, refreshToken, accessExpiry, err := newTokens(userId)
+		accessToken, accessExpiry, err := newAccessToken(userId)
 		if err != nil {
 			return nil, err
 		}
 		return &stub.RefreshReply{
 			AccessToken:          []byte(*accessToken),
-			RefreshToken:         []byte(*refreshToken),
 			AccessTokenExpiresAt: timestamppb.New(*accessExpiry),
 		}, nil
 	case errors.Is(err, jwt.ErrTokenMalformed):
@@ -442,7 +472,7 @@ func (s *pesanServer) RefreshSession(ctx context.Context, r *stub.RefreshRequest
 	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
 		return nil, status.Error(codes.PermissionDenied, "[ERROR] invalid token signature")
 	case errors.Is(err, jwt.ErrTokenExpired):
-		return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session expired")
+		return nil, status.Error(codes.PermissionDenied, "[ERROR] session expired")
 	case errors.Is(err, jwt.ErrTokenNotValidYet):
 		return nil, status.Error(codes.Unavailable, "[WARN] token yet valid")
 	default:
@@ -478,8 +508,8 @@ func (s *pesanServer) ReAuth(ctx context.Context, _ *emptypb.Empty) (*stub.Attes
 		}
 
 		cred.Transport = append(cred.Transport, protocol.AuthenticatorTransport(transport))
-		creds = append(creds, cred)
 		err = json.Unmarshal(flags, &cred.Flags)
+		creds = append(creds, cred)
 	}
 
 	user.Credentials = creds
@@ -539,23 +569,23 @@ func (s *pesanServer) VerifyPublicKeyReAuth(ctx context.Context, r *stub.VerifyP
 		return nil, status.Errorf(codes.DeadlineExceeded, "[WARN] session ended")
 	}
 
+	res = strings.TrimPrefix(res, "[")
+	res = strings.TrimSuffix(res, "]")
+
 	var cached SessionCache
 	err = json.Unmarshal([]byte(res), &cached)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
-	reader := bytes.NewReader(r.Signed)
-	bufReader := bufio.NewReader(reader)
+	reader := bytes.NewBuffer(r.Signed)
 
-	var req *http.Request
-	req, err = http.ReadRequest(bufReader)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	req := http.Request{
+		Body: io.NopCloser(reader),
 	}
 
 	var cred *webauthn.Credential
-	cred, err = wbAuthn.FinishLogin(&cached.User, cached.Session, req)
+	cred, err = wbAuthn.FinishLogin(&cached.User, cached.Session, &req)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "[ERROR] %v", err)
 	}
@@ -566,7 +596,12 @@ func (s *pesanServer) VerifyPublicKeyReAuth(ctx context.Context, r *stub.VerifyP
 
 	var accessToken, refreshToken *string
 	var accessExp *time.Time
-	accessToken, refreshToken, accessExp, err = newTokens(userId)
+	accessToken, accessExp, err = newAccessToken(userId)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err = newRefreshToken(userId)
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +632,12 @@ func (s *pesanServer) ReAuthWithPassword(ctx context.Context, r *stub.ReAuthPass
 
 	var accessToken, refreshToken *string
 	var accessExp *time.Time
-	accessToken, refreshToken, accessExp, err = newTokens(userId)
+	accessToken, accessExp, err = newAccessToken(userId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+	}
+
+	refreshToken, err = newRefreshToken(userId)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
