@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+
 	"errors"
 
 	"strings"
@@ -28,13 +28,14 @@ import (
 	"google.golang.org/grpc"
 
 	"google.golang.org/grpc/codes"
+
 	"google.golang.org/grpc/metadata"
 
 	"google.golang.org/grpc/status"
 )
 
 // NOTE: core - APPLICATION
-// *this is for an nvim easy jump; consider it as table of contents
+// *nvim + vertical monitor setup; consider it as table of contents
 var (
 	port, dbPort, cachePort                                int
 	db                                                     *sql.DB
@@ -45,12 +46,20 @@ var (
 	passkeyDuration, accessJwtLifespan, refreshJwtLifespan int
 )
 
-type pesanServer struct {
-	stub.UnimplementedPesanServer
+type publicSrvr struct {
+	stub.UnimplementedPublicServer
 }
 
-func newServer() *pesanServer {
-	return &pesanServer{}
+func newPublicSrvr() *publicSrvr {
+	return &publicSrvr{}
+}
+
+type protectedSrvr struct {
+	stub.UnimplementedProtectedServer
+}
+
+func newProtectedSrvr() *protectedSrvr {
+	return &protectedSrvr{}
 }
 
 func main() {
@@ -67,8 +76,9 @@ func main() {
 		db.Close()
 		return
 	}
-	srv := grpc.NewServer(grpc.UnaryInterceptor(unaryInterceptor))
-	stub.RegisterPesanServer(srv, newServer())
+	srv := grpc.NewServer(grpc.UnaryInterceptor(unaryInterceptor), grpc.StreamInterceptor(streamInterceptor))
+	stub.RegisterPublicServer(srv, newPublicSrvr())
+	stub.RegisterProtectedServer(srv, newProtectedSrvr())
 
 	fmt.Printf("[INFO] listening to port: %d..\n", port)
 	err = srv.Serve(lis)
@@ -130,81 +140,120 @@ func setEnvs() {
 
 // NOTE: core - INTERCEPTOR
 func unaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-
-	log.Printf("[INFO] Method: %s", info.FullMethod)
-	serviceName := "/pesan.Pesan"
-
-	switch info.FullMethod {
-	case fmt.Sprintf("%s/OnboardWithPublicKey", serviceName):
-	case fmt.Sprintf("%s/VerifyPublicKeyAndOnboard", serviceName):
-	case fmt.Sprintf("%s/OnboardWithPassword", serviceName):
-	case fmt.Sprintf("%s/DiscoverLogin", serviceName):
-	case fmt.Sprintf("%s/VerifyPublicKeyLogin", serviceName):
-	case fmt.Sprintf("%s/LoginWithPassword", serviceName):
-	default:
-		// NOTE: Auth
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			err := status.Errorf(codes.PermissionDenied, "[WARN] missing metadata")
-			log.Println(err)
-			return nil, err
-		}
-
-		authHeader := md["authorization"]
-		if len(authHeader) < 1 {
-			return nil, status.Errorf(codes.PermissionDenied, "[WARN] missing authorisation")
-		}
-
-		accessToken := strings.TrimPrefix(authHeader[0], "Bearer ")
-
-		parsedToken, err := jwt.Parse(accessToken, func(*jwt.Token) (interface{}, error) {
-			return []byte(accessSecret), nil
-		})
-
-		switch {
-		case errors.Is(err, jwt.ErrTokenMalformed):
-			return nil, status.Error(codes.Unauthenticated, "[WARN] not a token")
-		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
-			return nil, status.Error(codes.Unauthenticated, "[ERROR] invalid token signature")
-		case errors.Is(err, jwt.ErrTokenExpired):
-			allowedMethods := []string{fmt.Sprintf("%s/RefreshSession", serviceName), fmt.Sprintf("%s/ReAuth", serviceName), fmt.Sprintf("%s/VerifyPublicKeyReAuth", serviceName), fmt.Sprintf("%s/ReAuthWithPassword", serviceName)}
-			switch info.FullMethod {
-			case allowedMethods[0], allowedMethods[1], allowedMethods[2], allowedMethods[3]:
-				var userId *uuid.UUID
-				userId, err = extractUserIdFromToken(parsedToken)
-				if err != nil {
-					return nil, err
-				}
-				ctx = context.WithValue(ctx, "user_id", *userId)
-				if strings.Compare(info.FullMethod, allowedMethods[2]) == 0 || strings.Compare(info.FullMethod, allowedMethods[3]) == 0 {
-					checkTotalReAuthAttempts(ctx, *userId)
-				}
-			default:
-				return nil, status.Error(codes.Unauthenticated, "[ERROR] session expired")
-			}
-		case errors.Is(err, jwt.ErrTokenNotValidYet):
-			return nil, status.Error(codes.Unavailable, "[WARN] token yet valid")
-		case parsedToken.Valid:
-			var userId *uuid.UUID
-			userId, err = extractUserIdFromToken(parsedToken)
-			if err != nil {
-				return nil, err
-			}
-			ctx = context.WithValue(ctx, "user_id", *userId)
-		default:
-			return nil, status.Errorf(codes.Unauthenticated, "[ERROR] couldnt handle this token: %v", err)
-		}
+	logger("[INFO] Method: %s\n", info.FullMethod)
+	mctx, err := valid(ctx, info.FullMethod)
+	if err != nil {
+		return nil, err
 	}
+	ctx = *mctx
 
 	// NOTE: Logger
-	log.Printf("[INFO] Request: %v", req)
-	resp, err := handler(ctx, req)
+	logger("[INFO] Request: %v", req)
+	var resp any
+	resp, err = handler(ctx, req)
 	if err != nil {
-		log.Printf("[ERROR] %v", err)
+		logger("[ERROR] %v", err)
 	}
-	log.Printf("[INFO] %v", resp)
+	logger("[INFO] %v", resp)
 
 	return resp, err
+}
+
+func logger(format string, a ...any) {
+	fmt.Printf("LOG:\t"+format+"\n", a...)
+}
+
+func valid(ctx context.Context, methodName string) (*context.Context, error) {
+	if strings.HasPrefix(methodName, "/pesan.Public") {
+		return &ctx, nil
+	}
+
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Errorf(codes.PermissionDenied, "[WARN] missing metadata")
+	}
+
+	auth := md["authorization"]
+
+	if len(auth) < 1 {
+		return nil, status.Errorf(codes.PermissionDenied, "[WARN] missing authorisation")
+	}
+
+	accessToken := strings.TrimPrefix(auth[0], "Bearer ")
+
+	parsedToken, err := jwt.Parse(accessToken, func(*jwt.Token) (interface{}, error) {
+		return []byte(accessSecret), nil
+	})
+
+	switch {
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return nil, status.Error(codes.Unauthenticated, "[WARN] not a token")
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		// NOTE: prod wise this could be the sign of malintent
+		return nil, status.Error(codes.Unauthenticated, "[ERROR] invalid token signature")
+	case errors.Is(err, jwt.ErrTokenExpired):
+		fmt.Println("session expired!")
+		var userId *uuid.UUID
+		userId, err = extractUserIdFromToken(parsedToken)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, "user_id", *userId)
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(ctx)
+		cancel(jwt.ErrTokenExpired)
+		return &ctx, nil
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return nil, status.Error(codes.Unavailable, "[WARN] token yet valid")
+	case parsedToken.Valid:
+		fmt.Println("session valid!")
+		var userId *uuid.UUID
+		userId, err = extractUserIdFromToken(parsedToken)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, "user_id", *userId)
+		return &ctx, nil
+	default:
+		return nil, status.Errorf(codes.Unauthenticated, "[ERROR] couldnt handle this token: %v", err)
+	}
+}
+
+type wrappedStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (w *wrappedStream) RecvMsg(m any) error {
+	logger("Receive a message (Type: %T) at %v", m, time.Now().Format(time.RFC3339))
+	return w.ServerStream.RecvMsg(m)
+}
+
+func (w *wrappedStream) SendMsg(m any) error {
+	logger("Send a message (Type: %T) at %v", m, time.Now().Format(time.RFC3339))
+
+	return w.ServerStream.SendMsg(m)
+}
+
+func (w *wrappedStream) Context() context.Context {
+	return w.ctx
+}
+
+func newWrappedStream(s grpc.ServerStream, mCtx context.Context) grpc.ServerStream {
+	return &wrappedStream{s, mCtx}
+}
+
+func streamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	ctx, err := valid(ss.Context(), info.FullMethod)
+	if err != nil {
+		return status.Errorf(codes.Unauthenticated, "[ERROR] nope")
+	}
+
+	err = handler(srv, newWrappedStream(ss, *ctx))
+	if err != nil {
+		logger("[ERROR] RPC failed with error: %v", err)
+	}
+	return err
 }
 
 func extractUserIdFromToken(access *jwt.Token) (*uuid.UUID, error) {
@@ -346,19 +395,19 @@ func prepareStatements() {
 		`,
 		CreateAShop: `
 		INSERT INTO
-			shops(shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, locations, user_id)
+			shops(shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, location, user_id)
 		VALUES
 			($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`,
 		ReadShops: `
-			SELECT
-				shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, locations, updated_at
-			FROM
-				shops
-			WHERE
-				user_id = $1
-			LIMIT 1
+		SELECT
+			shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, location, role_id, edit_shop, open_close_shop, create_products, edit_products, delete_products, create_orders, edit_orders
+		FROM
+			shop_roles
+		WHERE
+			user_id = $1
 		`,
+		//AND shop_updated_at > $2
 		//CreateProduct: `INSERT INTO products(product_id, name, description, unit, price) VALUES( $1, $2, $3, $4, $5)`,
 		//// client will provide id on their side for an easy sync and redundant API refresh
 		//CreateCategory: `
@@ -392,13 +441,6 @@ func prepareStatements() {
 }
 
 // NOTE: core - CACHE
-
-// NOTE: might need to cache credentials, just incase user request on another device
-type SessionCache struct {
-	User    User                 `json:"user"`
-	Session webauthn.SessionData `json:"session"`
-}
-
 func establishRedis() {
 	rdHost := os.Getenv("RDS_HOST")
 	if len(rdHost) == 0 {
@@ -414,116 +456,6 @@ func establishRedis() {
 	})
 
 	fmt.Println("[INFO] cache established!")
-}
-
-func cacheAssertSession(ctx context.Context, session *webauthn.SessionData, user *User) error {
-	key := fmt.Sprintf("asserts:%s", session.Challenge)
-
-	cacheData := &SessionCache{
-		Session: *session,
-		User:    *user,
-	}
-
-	jsonCacheData, err := json.Marshal(cacheData)
-	if err != nil {
-		return status.Errorf(codes.Internal, "[ERROR] json marshaling failed: %v", err)
-	}
-
-	_, err = cache.JSONSet(ctx, key, "$", jsonCacheData).Result()
-	if err != nil {
-		return status.Errorf(codes.Internal, "[ERROR] unable to cache session: %v", err)
-	}
-
-	var expiring bool
-	expiring, err = cache.ExpireAt(ctx, key, session.Expires).Result()
-	if err != nil || !expiring {
-		return status.Error(codes.Internal, "[ERROR] setting cache expiration")
-	}
-
-	return nil
-}
-
-func getCachedUserFromAssertSession(ctx context.Context, challengeId string) (*string, error) {
-	key := fmt.Sprintf("asserts:%s", challengeId)
-	result, err := cache.JSONGet(ctx, key, ".user").Result()
-	if err != nil {
-		return nil, status.Error(codes.DeadlineExceeded, "[ERROR] session ended")
-	}
-	return &result, nil
-}
-
-func cacheAttestDiscoverableSession(ctx context.Context, session webauthn.SessionData) error {
-	cacheKey := fmt.Sprintf("attests:%s", session.Challenge)
-
-	marshaledSession, err := json.Marshal(session)
-	if err != nil {
-		return status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-
-	var res string
-	res, err = cache.JSONSet(ctx, cacheKey, "$", marshaledSession).Result()
-	if err != nil || strings.Compare(res, "OK") != 0 {
-		return status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-
-	var isExpiring bool
-	isExpiring, err = cache.ExpireAt(ctx, cacheKey, session.Expires).Result()
-	if err != nil || !isExpiring {
-		return status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-
-	return nil
-}
-
-func getCachedDiscoverableSessionFromAttestSession(ctx context.Context, challengeId string) (*string, error) {
-	cacheKey := fmt.Sprintf("attests:%s", challengeId)
-	res, err := cache.JSONGet(ctx, cacheKey, "$").Result()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-	return &res, nil
-}
-
-func checkTotalReAuthAttempts(ctx context.Context, userId uuid.UUID) error {
-	attemptKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
-	totalAttemptsStr, err := cache.Get(ctx, attemptKey).Result()
-	if err != nil {
-		// NOTE: fresh reattempt
-		return incrReAuthCounter(ctx, userId, time.Now().Add(time.Duration(passkeyDuration)*time.Second))
-	}
-	var totalAttempts int
-	if totalAttempts, err = strconv.Atoi(totalAttemptsStr); err != nil {
-		return status.Errorf(codes.Internal, "[ERROR] %v", err)
-	}
-	log.Printf("[INFO] total reauths attempts: %d\n", totalAttempts)
-	if totalAttempts > 2 {
-		return status.Error(codes.PermissionDenied, "[ERROR] reauth maxed; please login back")
-	}
-	return nil
-}
-
-func incrReAuthCounter(ctx context.Context, userId uuid.UUID, expiresAt time.Time) error {
-	cacheKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
-	_, err := cache.Incr(ctx, cacheKey).Result()
-	if err != nil {
-		return err
-	}
-	var ok bool
-	if ok, err = cache.ExpireAt(ctx, cacheKey, expiresAt).Result(); err != nil {
-		return err
-	}
-	if !ok {
-		return status.Errorf(codes.Internal, "[ERROR] unable to cache reauth session")
-	}
-	return nil
-}
-
-func clearReAuthCache(ctx context.Context, userId uuid.UUID) {
-	attemptKey := fmt.Sprintf("reauths:attempts:%s", userId.String())
-	cache.Del(ctx, attemptKey).Result()
-
-	cacheKey := fmt.Sprintf("reauths:%s", userId.String())
-	cache.JSONDel(ctx, cacheKey, "$")
 }
 
 // NOTE: core - WEBAUTHN
