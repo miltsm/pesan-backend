@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
 
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
 
@@ -18,6 +20,7 @@ import (
 
 	"google.golang.org/grpc/status"
 
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -189,4 +192,59 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 		Shops:        shops,
 		FreshSession: newSesh,
 	}, nil
+}
+
+func (prtc *protectedSrvr) OpenShop(ctx context.Context, r *stub.OpenShopRequest) (*emptypb.Empty, error) {
+	shopId, err := uuid.Parse(string(r.ShopId.Id))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
+	}
+
+	// TODO: check if their publicKey exist or not
+	// new publickey will be whitelisted into o4b-nats
+	// userId := ctx.Value("user_id").(uuid.UUID)
+
+	todayDt := time.Now().Format(time.DateOnly)
+	strmName := fmt.Sprintf("ORDERS_%s_%s", shopId, todayDt)
+	orderSubject := fmt.Sprintf("orders.%s.%s", shopId, todayDt)
+
+	// NOTE: closing time check, can be past
+	// front end will provide time selector UI
+	closeShopDuration := r.OpenUntil.AsTime().Sub(time.Now())
+	if closeShopDuration < 0 {
+		return nil, status.Errorf(codes.OutOfRange, "[ERROR] Closing time has past")
+	}
+	fmt.Printf("stream name: %v\nends at: %v", strmName, closeShopDuration)
+	_, err = shopJetstream.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     strmName,
+		Subjects: []string{orderSubject},
+		MaxAge:   closeShopDuration,
+	})
+	if err != nil {
+		// NOTE: stream already exist check
+		if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+			return nil, status.Error(codes.AlreadyExists, "Shop already opened")
+		} else {
+			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+		}
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (prtc *protectedSrvr) CloseShop(ctx context.Context, r *stub.CloseShopRequest) (*emptypb.Empty, error) {
+	shopId, err := uuid.Parse(string(r.ShopId.Id))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
+	}
+	strmName := fmt.Sprintf("ORDERS_%s_%s", shopId, time.Now().Format(time.DateOnly))
+	err = shopJetstream.DeleteStream(ctx, strmName)
+	if err != nil {
+		switch {
+		case errors.Is(err, jetstream.ErrStreamNotFound):
+			return nil, status.Errorf(codes.NotFound, "[ERROR] Not found. Shop may be close already\n")
+		default:
+			return nil, status.Errorf(codes.Internal, "[ERROR] %v\n", err)
+		}
+	}
+	return &emptypb.Empty{}, nil
 }

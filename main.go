@@ -20,6 +20,8 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -44,6 +46,7 @@ var (
 	wbAuthn                                                *webauthn.WebAuthn
 	accessSecret, refreshSecret                            []byte
 	passkeyDuration, accessJwtLifespan, refreshJwtLifespan int
+	shopJetstream                                          jetstream.JetStream
 )
 
 type publicSrvr struct {
@@ -68,6 +71,7 @@ func main() {
 	prepareStatements()
 	establishRedis()
 	configureWebAuthn()
+	establishNats()
 
 	var lis net.Listener
 	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", os.Getenv("HOST"), port))
@@ -184,6 +188,8 @@ func valid(ctx context.Context, methodName string) (*context.Context, error) {
 	parsedToken, err := jwt.Parse(accessToken, func(*jwt.Token) (interface{}, error) {
 		return []byte(accessSecret), nil
 	})
+
+	fmt.Printf("access token -> %s\n", accessToken)
 
 	switch {
 	case errors.Is(err, jwt.ErrTokenMalformed):
@@ -494,4 +500,19 @@ func configureWebAuthn() {
 	}
 
 	fmt.Println("[INFO] webauthn configured!")
+}
+
+// NOTE: core - NATS Jetstream
+func establishNats() {
+	nconn, err := nats.Connect("nats://o4b-nats:4222")
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to connect to NATS: %v\n", err)
+	}
+
+	shopJetstream, err = jetstream.New(nconn)
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to get Jetstream context: %v\n", err)
+	}
+
+	fmt.Println("[INFO] Connected to NATS + Jetstream")
 }
