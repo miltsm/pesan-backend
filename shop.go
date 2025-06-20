@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/nats-io/nats.go/jetstream"
 
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
@@ -191,6 +192,36 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 	return &stub.ShopPage{
 		Shops:        shops,
 		FreshSession: newSesh,
+	}, nil
+}
+
+func (prtc *protectedSrvr) ShopStatus(ctx context.Context, r *stub.ShopStatusRequest) (*stub.ShopStatusReply, error) {
+	shopId, err := uuid.Parse(string(r.ShopId.Id))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
+	}
+	todayDt := time.Now().Format(time.DateOnly)
+	strmName := fmt.Sprintf("ORDERS_%s_%s", shopId, todayDt)
+
+	var stts stub.ShopStatus
+	var strm jetstream.Stream
+	var totalCnsmr int
+	strm, err = shopJetstream.Stream(ctx, strmName)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			stts = stub.ShopStatus_closed
+		} else {
+			return nil, status.Errorf(codes.Internal, "[ERROR] failed to check stream: %v", err)
+		}
+	} else {
+		totalCnsmr = strm.CachedInfo().State.Consumers
+		stts = stub.ShopStatus_opened
+		fmt.Printf("total consumers: %d", totalCnsmr)
+	}
+
+	return &stub.ShopStatusReply{
+		Status:        stts,
+		TotalConsumer: int32(totalCnsmr),
 	}, nil
 }
 
