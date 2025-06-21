@@ -133,6 +133,7 @@ CREATE TABLE shops (
 
 CREATE TABLE roles (
 	role_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+	nats_pub_key text,
 	edit_shop boolean DEFAULT false,
 	open_close_shop boolean NOT NULL DEFAULT false,
 	create_products boolean NOT NULL DEFAULT false,
@@ -147,7 +148,8 @@ CREATE TABLE roles (
 	updated_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	created_by uuid REFERENCES users ON DELETE RESTRICT,
 	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE,
-	shop_id uuid NOT NULL UNIQUE REFERENCES shops ON DELETE CASCADE
+	shop_id uuid NOT NULL REFERENCES shops ON DELETE CASCADE,
+	UNIQUE (user_id, shop_id, nats_pub_key)
 );
 
 CREATE OR REPLACE FUNCTION limit_shop_row_insert()

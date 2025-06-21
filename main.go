@@ -290,6 +290,8 @@ const (
 	ReadAPassword
 	CreateAShop
 	ReadShops
+	ReadNKey
+	UpdateNKey
 	CreateProduct
 	CreateCategory
 	UpdateCategory
@@ -412,6 +414,22 @@ func prepareStatements() {
 			shop_roles
 		WHERE
 			user_id = $1
+		`,
+		ReadNKey: `
+		SELECT 
+			nats_pub_key
+		FROM
+			roles
+		WHERE
+			user_id = $1 AND shop_id = $2
+		`,
+		UpdateNKey: `
+		UPDATE
+			roles
+		SET
+			nats_pub_key = $1
+		WHERE
+			user_id = $2 AND shop_id = $3
 		`,
 		//AND shop_updated_at > $2
 		//CreateProduct: `INSERT INTO products(product_id, name, description, unit, price) VALUES( $1, $2, $3, $4, $5)`,

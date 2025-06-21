@@ -34,7 +34,7 @@ func (s *protectedSrvr) CreateNewShop(ctx context.Context, r *stub.NewShopReques
 		}, nil
 	}
 
-	userId := ctx.Value("user_id").(*uuid.UUID)
+	userId := ctx.Value("user_id").(uuid.UUID)
 
 	if len(r.Name) < 6 {
 		return nil, status.Errorf(codes.InvalidArgument, "[WARN] name<6")
@@ -231,9 +231,32 @@ func (prtc *protectedSrvr) OpenShop(ctx context.Context, r *stub.OpenShopRequest
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
 	}
 
-	// TODO: check if their publicKey exist or not
-	// new publickey will be whitelisted into o4b-nats
-	// userId := ctx.Value("user_id").(uuid.UUID)
+	// NOTE: check if their publicKey exist or not
+	userId := ctx.Value("user_id").(uuid.UUID)
+	var currentNkey sql.NullString
+	err = statements[ReadNKey].QueryRow(userId, shopId).Scan(&currentNkey)
+	if err != nil {
+		// NOTE: ask client to register new NATS public key
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, status.Error(codes.NotFound, "[ERROR] public key yet to register")
+		} else {
+			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+		}
+	}
+
+	if len(currentNkey.String) == 0 && (r.O4BPk == nil || (r.O4BPk != nil && len(r.O4BPk) == 0)) {
+		return nil, status.Error(codes.InvalidArgument, "[ERROR] public key registration required!")
+	}
+
+	// NOTE: update public key if provided
+	if r.O4BPk != nil && len(string(r.O4BPk)) > 0 && strings.Compare(currentNkey.String, string(r.O4BPk)) != 0 {
+		_, err = statements[UpdateNKey].Exec(string(r.O4BPk), userId, shopId)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
+		}
+	}
+
+	// TODO: whitelist public key
 
 	todayDt := time.Now().Format(time.DateOnly)
 	strmName := fmt.Sprintf("ORDERS_%s_%s", shopId, todayDt)
