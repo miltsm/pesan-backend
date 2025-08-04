@@ -27,6 +27,7 @@ import (
 
 	stub "github.com/miltsm/pesan-grpc-stubs/go"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 
 	"google.golang.org/grpc/codes"
@@ -34,6 +35,9 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"google.golang.org/grpc/status"
+
+	"firebase.google.com/go"
+	"firebase.google.com/go/messaging"
 )
 
 // NOTE: core - APPLICATION
@@ -47,6 +51,8 @@ var (
 	accessSecret, refreshSecret                            []byte
 	passkeyDuration, accessJwtLifespan, refreshJwtLifespan int
 	shopJetstream                                          jetstream.JetStream
+	fb                                                     *firebase.App
+	fbMsgClient                                            *messaging.Client
 )
 
 type publicSrvr struct {
@@ -72,6 +78,7 @@ func main() {
 	establishRedis()
 	configureWebAuthn()
 	establishNats()
+	establishFirebase()
 
 	var lis net.Listener
 	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", os.Getenv("HOST"), port))
@@ -83,6 +90,8 @@ func main() {
 	srv := grpc.NewServer(grpc.UnaryInterceptor(unaryInterceptor), grpc.StreamInterceptor(streamInterceptor))
 	stub.RegisterPublicServer(srv, newPublicSrvr())
 	stub.RegisterProtectedServer(srv, newProtectedSrvr())
+
+	initialiseShopWorkerPeriodicChecks()
 
 	fmt.Printf("[INFO] listening to port: %d..\n", port)
 	err = srv.Serve(lis)
@@ -205,6 +214,7 @@ func valid(ctx context.Context, methodName string) (*context.Context, error) {
 			return nil, err
 		}
 		ctx = context.WithValue(ctx, "user_id", *userId)
+
 		var cancel context.CancelCauseFunc
 		ctx, cancel = context.WithCancelCause(ctx)
 		cancel(jwt.ErrTokenExpired)
@@ -265,12 +275,12 @@ func streamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInf
 func extractUserIdFromToken(access *jwt.Token) (*uuid.UUID, error) {
 	userIdStr, err := access.Claims.GetSubject()
 	if err != nil {
-		return nil, status.Error(codes.DataLoss, "[WARN] unknown token owner")
+		return nil, status.Error(codes.Unauthenticated, "[ERROR] unknown token owner")
 	}
 	var userId uuid.UUID
 	userId, err = uuid.Parse(userIdStr)
 	if err != nil {
-		return nil, status.Error(codes.Aborted, "[ERROR] malformed user id")
+		return nil, status.Error(codes.Unauthenticated, "[ERROR] malformed user id")
 	}
 	return &userId, nil
 }
@@ -279,7 +289,8 @@ func extractUserIdFromToken(access *jwt.Token) (*uuid.UUID, error) {
 type StatementKey int
 
 const (
-	CreateAnUser StatementKey = iota
+	CreateAPasswordUser StatementKey = iota
+	CreateAPasskeyUser
 	ReadAnUserByHandle
 	ReadAnUserProfile
 	ReadAnUserProfileByCredentialId
@@ -288,10 +299,19 @@ const (
 	UpdateAPublicKey
 	CreateAPassword
 	ReadAPassword
-	CreateAShop
+	CreateAShopAndReturnDevices
+	ReadAShop
 	ReadShops
-	ReadNKey
-	UpdateNKey
+	ReadShopIds
+	UpsertADevice
+	ReadDeviceFcm
+	UpdateDeviceFcm
+	ReadDeviceNKey
+	UpdateDeviceNKey
+	CreateAShopDevice
+	ReadAShopDevice
+	UpdateAShopDevice
+	DeleteAShopDevice
 	CreateProduct
 	CreateCategory
 	UpdateCategory
@@ -326,10 +346,69 @@ func prepareStatements() {
 	temp := make(map[StatementKey]*sql.Stmt)
 
 	queries := map[StatementKey]string{
-		CreateAnUser: `
+		CreateAPasswordUser: `
+		WITH new_user AS (
+			INSERT INTO 
+				users(user_handle, display_name)
+			VALUES
+				($1, $2)
+			RETURNING
+				user_id
+		),
+		new_password AS (
 			INSERT INTO
-				users(user_id, user_handle, display_name)
-			VALUES( $1, $2, $3)
+				passwords(hashed, user_id)
+			SELECT $3, user_id FROM new_user
+		),
+		new_device AS (
+			INSERT INTO
+				devices(name, platform, app_version)
+			VALUES
+				($4, $5, $6)
+			RETURNING
+				device_id
+		),
+		link_user_device AS (
+			INSERT INTO 
+				user_devices(user_id, device_id)
+			SELECT
+				user_id, device_id
+			FROM
+				new_user, new_device
+		)
+		SELECT user_id, device_id FROM new_user, new_device
+		`,
+		CreateAPasskeyUser: `
+		WITH new_user AS (
+			INSERT INTO
+				users(user_handle, display_name)
+			VALUES
+				($1, $2)
+			RETURNING
+				user_Id
+		),
+		new_public_key AS (
+			INSERT INTO
+				passkeys(passkey_id, public_key, attestation_type, transport, flags, authenticator_aaguid, user_id)
+			SELECT $3, $4, $5, $6, $7, $8, user_id FROM new_user
+		),
+		new_device AS (
+			INSERT INTO
+				devices(name, platform, app_version)
+			VALUES
+				($9, $10, $11)
+			RETURNING
+				device_id
+		),
+		link_user_device AS (
+			INSERT INTO
+				user_devices(user_id, device_Id)
+			SELECT
+				user_id, device_id
+			FROM
+				new_user, new_device
+		)
+		SELECT user_id, device_id FROM new_user, new_device
 		`,
 		ReadAnUserByHandle: `
 			SELECT 
@@ -401,11 +480,27 @@ func prepareStatements() {
 		WHERE
 			user_id::text = $1 AND hashed = crypt($2, hashed)	
 		`,
-		CreateAShop: `
-		INSERT INTO
-			shops(shop_id, name, tags, open_hour, closing_hour, contacts, operation_days, location, user_id)
+		CreateAShopAndReturnDevices: `
+		WITH new_shop as (
+			INSERT INTO
+			shops(name, tags, open_hour, closing_hour, contacts, operation_days, location, user_id)
 		VALUES
-			($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING shop_id	
+		)
+		SELECT new_shop.shop_id, devices.device_id, devices.fcm_token
+		FROM user_devices
+		CROSS JOIN new_shop
+		JOIN devices ON devices.device_id = user_devices.device_id
+		WHERE user_devices.user_id = $8
+		`,
+		ReadAShop: `
+		SELECT
+			name
+		FROM
+			shops
+		WHERE
+			shop_id = $1
 		`,
 		ReadShops: `
 		SELECT
@@ -415,21 +510,99 @@ func prepareStatements() {
 		WHERE
 			user_id = $1
 		`,
-		ReadNKey: `
+
+		ReadShopIds: `
+		SELECT
+			shop_id
+		FROM
+			shop_roles
+		WHERE
+			user_id = $1
+		`,
+		UpsertADevice: `
+		WITH device_upsert AS (
+			INSERT INTO devices(device_id, name, platform, app_version)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (device_id) 
+			DO UPDATE SET
+				name = COALESCE(EXCLUDED.name, devices.name),
+				platform = COALESCE(EXCLUDED.platform, devices.platform),
+				app_version = COALESCE(EXCLUDED.app_version, devices.app_version)
+			WHERE
+				(devices.name IS DISTINCT FROM EXCLUDED.name OR
+				devices.platform IS DISTINCT FROM EXCLUDED.platform OR
+				devices.app_version IS DISTINCT FROM EXCLUDED.app_version)
+			RETURNING device_id
+		),
+		link_user_device AS (
+			INSERT INTO
+				user_devices(user_id, device_id)
+			SELECT 
+				$5, device_id 
+			FROM 
+				device_upsert
+			ON CONFLICT
+				(user_id, device_id)
+			DO NOTHING
+		)
+		SELECT device_id FROM device_upsert
+
+		`,
+		UpdateDeviceFcm: `
+		UPDATE
+			devices
+		SET
+			fcm_token = $1
+		WHERE
+			device_id = $2
+		`,
+		ReadDeviceNKey: `
 		SELECT 
 			nats_pub_key
 		FROM
-			roles
+			devices	
 		WHERE
-			user_id = $1 AND shop_id = $2
+			device_id = $1
 		`,
-		UpdateNKey: `
+		UpdateDeviceNKey: `
 		UPDATE
-			roles
+			devices
 		SET
 			nats_pub_key = $1
 		WHERE
-			user_id = $2 AND shop_id = $3
+			device_id = $2
+		`,
+		CreateAShopDevice: `
+		INSERT INTO
+			shop_devices(fcm_topic, shop_id, device_id)
+		VALUES
+			($1, $2, $3)
+		ON CONFLICT 
+			(shop_id, device_id) 
+		DO NOTHING
+		`,
+		ReadAShopDevice: `
+		SELECT
+			status, last_active
+		FROM
+			shop_devices
+		WHERE
+			shop_id = $1 AND device_id = $2
+		`,
+		UpdateAShopDevice: `
+		UPDATE
+			shop_devices
+		SET
+			last_active = $1,
+			status = $2
+		WHERE
+			shop_id = $3 AND device_id = $4
+		`,
+		DeleteAShopDevice: `
+		DELETE FROM 
+			shop_devices 
+		WHERE
+			shop_id = $1 AND device_id = $2
 		`,
 		//AND shop_updated_at > $2
 		//CreateProduct: `INSERT INTO products(product_id, name, description, unit, price) VALUES( $1, $2, $3, $4, $5)`,
@@ -533,4 +706,21 @@ func establishNats() {
 	}
 
 	fmt.Println("[INFO] Connected to NATS + Jetstream")
+}
+
+// NOTE: core - Firebase
+func establishFirebase() {
+	opt := option.WithCredentialsFile(os.Getenv("FIREBASE_SDK_PATH"))
+	var err error
+	fb, err = firebase.NewApp(context.Background(), nil, opt)
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to establish firebase: %v\n", err)
+	}
+
+	fbMsgClient, err = fb.Messaging(context.Background())
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to setup fb messaging client")
+	}
+
+	fmt.Println("[INFO] Firebase Admin establish!")
 }

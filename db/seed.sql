@@ -131,9 +131,13 @@ CREATE TABLE shops (
 	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE
 );
 
+CREATE TRIGGER update_shop_timestamp
+BEFORE UPDATE ON shops
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
+
 CREATE TABLE roles (
 	role_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-	nats_pub_key text,
 	edit_shop boolean DEFAULT false,
 	open_close_shop boolean NOT NULL DEFAULT false,
 	create_products boolean NOT NULL DEFAULT false,
@@ -149,8 +153,13 @@ CREATE TABLE roles (
 	created_by uuid REFERENCES users ON DELETE RESTRICT,
 	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE,
 	shop_id uuid NOT NULL REFERENCES shops ON DELETE CASCADE,
-	UNIQUE (user_id, shop_id, nats_pub_key)
+	UNIQUE (shop_id, user_id)
 );
+
+CREATE TRIGGER update_role_timestamp
+BEFORE UPDATE ON roles
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
 
 CREATE OR REPLACE FUNCTION limit_shop_row_insert()
 RETURNS TRIGGER AS $$
@@ -181,6 +190,7 @@ AFTER INSERT ON shops
 FOR EACH ROW
 EXECUTE FUNCTION create_owner_role();
 
+-- TODO: m:n shop_roles
 CREATE VIEW shop_roles AS
 SELECT
 	s.shop_id,
@@ -200,10 +210,90 @@ SELECT
 	r.delete_products,
 	r.create_orders,
 	r.edit_orders,
-	-- roles are for future feature: 1 shops, M staffs
+	-- NOTE: roles are for future feature: 1 shops, M staffs
 	r.updated_at AS role_updated_at,
 	r.user_id
 FROM
 	shops s
 LEFT JOIN
 	roles r ON s.shop_id = r.shop_id;
+
+CREATE TYPE platform AS ENUM ('android', 'ios', 'web');
+
+CREATE TABLE devices (
+	-- NOTE: will change id if user uninstall the app
+	device_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+	name varchar(100),
+	platform platform NOT NULL DEFAULT 'web',
+	fcm_token text,
+	nats_pub_key text,
+	app_version varchar(20),
+	os_version varchar(20),
+	created_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_devices_fcm_token ON devices(fcm_token);
+
+CREATE TRIGGER update_device_timestamp
+BEFORE UPDATE ON devices
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
+
+CREATE TABLE user_devices (
+	user_id uuid NOT NULL REFERENCES users ON DELETE CASCADE,
+	device_id uuid NOT NULL REFERENCES devices ON DELETE CASCADE,
+	created_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (user_id, device_id)
+);
+
+CREATE TRIGGER update_user_device_timestamp
+BEFORE UPDATE ON user_devices
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
+
+CREATE OR REPLACE FUNCTION limit_user_devices()
+RETURNS TRIGGER AS $$
+DECLARE
+	oldest_device_id uuid;
+BEGIN
+	IF (SELECT count(*) FROM user_devices WHERE user_id = NEW.user_id) >= 2 THEN
+		SELECT device_id INTO oldest_device_id
+		FROM user_devices WHERE user_id = NEW.user_id
+		ORDER BY created_at ASC LIMIT 1;
+
+		DELETE FROM user_devices WHERE user_id = NEW.user_id AND device_id = oldest_device_id;
+		
+		-- Delete actual device if no one using it
+		DELETE FROM devices 
+		WHERE device_id = oldest_device_id AND NOT EXISTS (
+			SELECT 1 FROM user_devices WHERE device_id = oldest_device_id
+		);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_limit_user_devices
+BEFORE INSERT ON user_devices
+FOR EACH ROW
+EXECUTE FUNCTION limit_user_devices();
+
+CREATE TYPE device_status AS ENUM ('offline', 'online');
+
+CREATE TABLE shop_devices (
+	device_id uuid REFERENCES devices ON DELETE CASCADE,
+	shop_id uuid REFERENCES shops ON DELETE CASCADE,
+	fcm_topic text,
+	status device_status DEFAULT 'offline',
+	last_active timestamp WITH TIME ZONE,
+	created_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at timestamp WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (device_id, shop_id)
+);
+
+CREATE TRIGGER update_shop_device_timestamp
+BEFORE UPDATE ON shop_devices
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp();
