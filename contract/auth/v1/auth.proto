@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package auth.v1;
+
+import "device/v1/device.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "uuid/v1/uuid.proto";
+
+option go_package = "./v1";
+
+// NOTE: COMMON
+message PublicKeyRequest {
+  bytes signed = 1;
+  optional string user_handle = 2;
+  device.v1.Device device_info = 3;
+}
+
+message PublicKeyOption {
+  bytes challenge = 1;
+  google.protobuf.Timestamp valid_until = 2;
+}
+
+message UserSession {
+  bytes access_token = 1;
+  string user_handle = 2;
+  string display_name = 3;
+  bytes refresh_token = 4;
+  optional uint32 total_passkey = 5;
+  optional google.protobuf.Timestamp last_password_updated = 6;
+  google.protobuf.Timestamp access_token_expires_at = 7;
+  google.protobuf.Timestamp refresh_token_expires_at = 8;
+  uuid.v1.UuId device_id = 9;
+}
+
+// NOTE: ONBOARD
+service OnboardService {
+  rpc PublicKeyOnboard(PublicKeyOnboardRequest) returns (PublicKeyOnboardResponse);
+  rpc VerifyOnboardPublicKey(VerifyOnboardPublicKeyRequest) returns (VerifyOnboardPublicKeyRequest);
+  rpc PasswordOnboard(PasswordOnboardRequest) returns (PasswordOnboardResponse);
+}
+
+message PublicKeyOnboardRequest {
+  string user_handle = 1;
+  optional string display_name = 2;
+}
+
+message PublicKeyOnboardResponse {
+  PublicKeyOption option = 1;
+}
+
+message VerifyOnboardPublicKeyRequest {
+  PublicKeyRequest request = 1;
+}
+
+message VerifyOnboardPublicKeyResponse {
+  UserSession user_session = 1;
+}
+
+message PasswordOnboardRequest {
+  string user_handle = 1;
+  bytes new_password = 2;
+  optional string display_name = 3;
+  optional device.v1.Device device_info = 4;
+}
+
+message PasswordOnboardResponse {
+  UserSession user_session = 1;
+}
+
+// NOTE: AUTHENTICATION
+service AuthService {
+  rpc DiscoverLogin(DiscoverLoginRequest) returns (DiscoverLoginResponse);
+  rpc VerifyLoginPublicKey(VerifyLoginPublicKeyRequest) returns (VerifyLoginPublicKeyResponse);
+  rpc PasswordLogin(PasswordLoginRequest) returns (PasswordLoginResponse);
+}
+
+message DiscoverLoginRequest {
+  google.protobuf.Empty nothing = 1;
+}
+
+message DiscoverLoginResponse {
+  PublicKeyOption option = 1;
+}
+
+message VerifyLoginPublicKeyRequest {
+  PublicKeyRequest request = 1;
+}
+
+message VerifyLoginPublicKeyResponse {
+  UserSession user_session = 1;
+}
+
+message PasswordLoginRequest {
+  string user_handle = 1;
+  bytes password = 2;
+  optional device.v1.Device device_info = 3;
+}
+
+message PasswordLoginResponse {
+  UserSession user_session = 1;
+}
+
+// NOTE: RE-AUTH
+service ReAuthService {
+  rpc RefreshSession(RefreshSessionRequest) returns (RefreshSessionResponse);
+  rpc ReAuth(ReAuthRequest) returns (ReAuthResponse);
+  rpc VerifyPublicKey(VerifyPublicKeyRequest) returns (VerifyPublicKeyResponse);
+  rpc PasswordReAuth(PasswordReAuthRequest) returns (PasswordReAuthResponse);
+}
+
+message Session {
+  bytes access_token = 1;
+  optional bytes refresh_token = 2;
+  google.protobuf.Timestamp access_token_expires_at = 3;
+  optional google.protobuf.Timestamp refresh_token_expires_at = 4;
+}
+
+message RefreshSessionRequest {
+  bytes token = 1;
+}
+
+message RefreshSessionResponse {
+  Session new_session = 1;
+}
+
+message ReAuthRequest {
+  bytes signed = 1;
+}
+
+message ReAuthResponse {
+  PublicKeyOption option = 1;
+}
+
+message VerifyPublicKeyRequest {
+  bytes signed = 1;
+  optional string user_handle = 2;
+}
+
+message VerifyPublicKeyResponse {
+  Session new_session = 1;
+}
+
+message PasswordReAuthRequest {
+  string user_handle = 1;
+  bytes password = 2;
+}
+
+message PasswordReAuthResponse {
+  Session new_session = 1;
+}

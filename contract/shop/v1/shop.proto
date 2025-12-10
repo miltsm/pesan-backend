@@ -1,0 +1,208 @@
+syntax = "proto3";
+
+package shop.v1;
+
+import "auth/v1/auth.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "uuid/v1/uuid.proto";
+
+option go_package = "./v1";
+
+service ShopService {
+  rpc CreateNewShop(CreateNewShopRequest) returns (CreateNewShopRequest);
+  rpc GetShops(GetShopsRequest) returns (GetShopsResponse);
+  rpc ShopDeviceStatus(ShopDeviceStatusRequest) returns (ShopDeviceStatusResponse);
+  rpc OpenShop(OpenShopRequest) returns (OpenShopResponse);
+  rpc CloseShop(CloseShopRequest) returns (CloseShopResponse);
+  rpc UpdateOrderAccessConfig(UpdateOrderAccessConfigRequest) returns (UpdateOrderAccessConfigResponse);
+
+  // NOTE: [INFO] to revise or decide to scratch off
+  rpc GetOrderSession(OrderSessionRequest) returns (OrderSession);
+  // TODO: to revise
+  //rpc CreateNewProduct(CreateNewProductRequest) returns (CreateNewProductResponse);
+  // NOTE: [INFO] this might future improvement
+  //rpc UploadProductPhotos(stream NewPhoto) returns (google.protobuf.Empty);
+}
+
+enum ContactType {
+  email = 0;
+  phone = 1;
+}
+
+message Contact {
+  ContactType type = 1;
+  string display = 2;
+  string actual = 3;
+}
+
+message OperationHour {
+  int32 hour = 1;
+  int32 minute = 2;
+}
+
+enum Day {
+  monday = 0;
+  tuesday = 1;
+  wednesday = 2;
+  thursday = 3;
+  friday = 4;
+  saturday = 5;
+  sunday = 6;
+}
+
+message ReAuthRequest {
+  optional bytes signed = 1;
+  optional bytes password = 2;
+}
+
+message CreateNewShopRequest {
+  string name = 1;
+  repeated Contact contacts = 2;
+  string location = 3;
+  repeated string tags = 4;
+  OperationHour opens_at = 5;
+  OperationHour closes_at = 6;
+  repeated Day operation_days = 7;
+  // this is to allow the refresh process efficiently
+  optional bytes refresh_token = 8;
+  optional ReAuthRequest r_auth = 9;
+}
+
+message CreateNewShopResponse {
+  uuid.v1.UuId shop_id = 1;
+  google.protobuf.Timestamp last_updated_at = 2;
+  optional auth.v1.Session fresh_session = 3;
+  optional auth.v1.PublicKeyOption options = 4;
+}
+
+message GetShopsRequest {
+  uint32 page = 1;
+  google.protobuf.Timestamp last_requested_at = 2;
+  // this is to allow the refresh process efficiently
+  optional bytes refresh_token = 3;
+  optional ReAuthRequest r_auth = 4;
+}
+
+message ShopPb {
+  uuid.v1.UuId shop_id = 1;
+  string name = 2;
+  repeated string tags = 3;
+  OperationHour opens_at = 4;
+  OperationHour closes_at = 5;
+  repeated Contact contacts = 6;
+  repeated Day operation_days = 7;
+  optional string location = 8;
+}
+
+message RolePb {
+  uuid.v1.UuId role_id = 1;
+  bool edit_shop = 2;
+  bool open_close_shop = 3;
+  bool create_products = 4;
+  bool edit_products = 5;
+  bool delete_products = 6;
+  bool create_orders = 7;
+  bool edit_orders = 8;
+}
+
+message ShopRole {
+  optional ShopPb shop = 1;
+  optional RolePb role = 2;
+}
+
+message GetShopsResponse {
+  repeated ShopRole shops = 1;
+  optional auth.v1.Session fresh_session = 2;
+  optional auth.v1.PublicKeyOption options = 3;
+}
+
+message ShopDeviceStatusRequest {
+  uuid.v1.UuId shop_id = 1;
+  uuid.v1.UuId device_id = 2;
+}
+
+enum ShopDeviceStatus {
+  online = 0;
+  offline = 1;
+}
+
+message ShopDeviceStatusResponse {
+  ShopDeviceStatus status = 1;
+  int32 total_consumer = 2;
+}
+
+message OpenShopRequest {
+  uuid.v1.UuId shop_id = 1;
+  google.protobuf.Timestamp open_until = 2;
+  optional bool update_closing_time = 3;
+  // NOTE: [INFO] merchant needs to provide their nkey(public) for the first 'open for business'
+  optional bytes o4b_pk = 4;
+  uuid.v1.UuId device_id = 5;
+}
+
+message OpenShopResponse {
+  google.protobuf.Empty ok = 1;
+}
+
+message CloseShopRequest {
+  uuid.v1.UuId shop_id = 1;
+}
+
+message CloseShopResponse {
+  google.protobuf.Empty ok = 1;
+}
+
+enum ServingMethod {
+  dine_in = 0;
+  take_away = 1;
+  delivery = 2;
+}
+
+// server needs to keep this data; easier to generate session for customer app
+message UpdateOrderAccessConfigRequest {
+  optional int64 order_session_duration = 1; // default is 10 minutes, for customer to place orders
+  optional bool requires_additional_id = 2; // mobile no. or table no., customer needs to provide this in order to place an order
+  optional ServingMethod serving_method = 3; // dine and take-away; delivery maybe in future
+}
+
+message UpdateOrderAccessConfigResponse {
+  google.protobuf.Empty ok = 1;
+}
+
+message Category {
+  // for existing category selection
+  optional string category_id = 1;
+  // for new category
+  optional string name = 2;
+  optional string description = 3;
+  optional google.protobuf.Timestamp available_from = 4;
+  optional google.protobuf.Timestamp available_until = 5;
+  repeated string available_weekly = 6;
+}
+
+message CreateNewProductRequest {
+  string name = 1;
+  optional string description = 2;
+  string unit_label = 3;
+  double unit_price = 4;
+  repeated Category categories = 5;
+}
+
+message CreateNewProductResponse {
+  string new_product_id = 1;
+}
+
+message NewPhoto {
+  bytes chunk = 1;
+}
+
+message OrderSessionRequest {
+  uuid.v1.UuId shop_id = 1;
+}
+
+message OrderSession {
+  string order_subject = 1;
+  string order_token = 2; // customer gateway to the nats stream
+  google.protobuf.Timestamp expires_at = 3;
+}

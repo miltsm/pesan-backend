@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package device.v1;
+
+option go_package = "./v1";
+
+enum Platform {
+  web = 0;
+  android = 1;
+  ios = 2;
+}
+
+message Device {
+  string name = 1;
+  Platform platform = 2;
+  string app_version = 3;
+}

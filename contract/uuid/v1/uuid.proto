@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package uuid.v1;
+
+option go_package = "./v1";
+
+message UuId {
+  bytes id = 1;
+}
