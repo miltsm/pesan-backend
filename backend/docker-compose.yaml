@@ -1,0 +1,58 @@
+name: pesan
+
+services:
+  be:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: final
+    expose:
+      - ${PORT}
+    environment:
+      HOST: ${HOST}
+      PORT: ${PORT}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      RDS_HOST: ${RDS_HOST}
+      RDS_PORT: ${RDS_PORT}
+      ACCESS_JWT_LIFESPAN: ${ACCESS_JWT_LIFESPAN}
+      REFRESH_JWT_LIFESPAN: ${REFRESH_JWT_LIFESPAN}
+      PASSKEY_DURATION: ${PASSKEY_DURATION}
+      ACCESS_SECRET_PATH: ${ACCESS_TOKEN_SECRET}
+      REFRESH_SECRET_PATH: ${REFRESH_TOKEN_SECRET}
+      NATS_HOST: ${NATS_HOST}
+      NATS_PORT: ${NATS_PORT}
+      FIREBASE_SDK_PATH: /run/secrets/fb-service-acc
+      ANDROID_KEY_HASH: ${ANDROID_KEY_HASH}
+    secrets:
+      - db-password
+    networks:
+      - shared-network
+
+  proxy:
+    image: nginx:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./well-known:/usr/share/nginx/html/.well-known:ro
+      - ./server.crt:/etc/nginx/server.crt:ro
+      - ./proxy/server.key:/etc/nginx/server.key:ro
+    networks:
+      - shared-network
+    restart: unless-stopped
+
+networks:
+  shared-network:
+    name: mildotdev-network
+    external: true
+
+secrets:
+  db-password:
+    file: db/password.txt
+  fb-service-acc:
+    file: firebase/service-account.json

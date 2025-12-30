@@ -13,21 +13,20 @@ import (
 	"fmt"
 	"time"
 
-	//"firebase.google.com/go/messaging"
 	"firebase.google.com/go/messaging"
 	"github.com/google/uuid"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	stub "github.com/miltsm/pesan-grpc-stubs/go"
-
 	"google.golang.org/grpc/codes"
 
 	"google.golang.org/grpc/status"
 
-	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	shop "github.com/miltsm/pesan-backend/proto/shop/v1"
+	pesanId "github.com/miltsm/pesan-backend/proto/uuid/v1"
 )
 
 type ShopMonitor struct {
@@ -46,10 +45,10 @@ type Device struct {
 }
 
 // NOTE: new shop
-func (s *protectedSrvr) CreateNewShop(ctx context.Context, r *stub.NewShopRequest) (*stub.NewShopReply, error) {
+func (s *shopService) CreateNewShop(ctx context.Context, r *shop.CreateNewShopRequest) (*shop.CreateNewShopResponse, error) {
 	newSesh, opts, err := requiresRefreshOrReauth(ctx, r.RefreshToken, r.RAuth)
 	if opts != nil {
-		return &stub.NewShopReply{
+		return &shop.CreateNewShopResponse{
 			Options: opts,
 		}, nil
 	}
@@ -140,8 +139,8 @@ func (s *protectedSrvr) CreateNewShop(ctx context.Context, r *stub.NewShopReques
 		}
 	}
 
-	return &stub.NewShopReply{
-		ShopId: &stub.UuId{
+	return &shop.CreateNewShopResponse{
+		ShopId: &pesanId.UuId{
 			Id: []byte(newId.String()),
 		},
 		LastUpdatedAt: timestamppb.New(time.Now()),
@@ -150,11 +149,10 @@ func (s *protectedSrvr) CreateNewShop(ctx context.Context, r *stub.NewShopReques
 }
 
 // NOTE: shop page
-func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stub.ShopPage, error) {
-
+func (s *shopService) GetShops(ctx context.Context, r *shop.GetShopsRequest) (*shop.GetShopsResponse, error) {
 	newSesh, opts, err := requiresRefreshOrReauth(ctx, r.RefreshToken, r.RAuth)
 	if opts != nil {
-		return &stub.ShopPage{
+		return &shop.GetShopsResponse{
 			Options: opts,
 		}, nil
 	}
@@ -171,7 +169,7 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 	}
 	defer rows.Close()
 
-	var shops []*stub.ShopRole
+	var shops []*shop.ShopRole
 	// NOTE: updated_at is used for syncing purpose between client & server
 	for rows.Next() {
 		var shopId, roleId uuid.UUID
@@ -203,7 +201,7 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 		}
 
-		var contacts []*stub.Contact
+		var contacts []*shop.Contact
 		err = json.Unmarshal(contactsB, &contacts)
 		if err != nil {
 			logError(128, err)
@@ -214,23 +212,23 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 		opDaysStr = strings.TrimSuffix(opDaysStr, "}")
 		days := strings.Split(opDaysStr, ",")
 
-		var opDays []stub.Day
+		var opDays []shop.Day
 		for _, day := range days {
-			opDays = append(opDays, stub.Day(stub.Day_value[day]))
+			opDays = append(opDays, shop.Day(shop.Day_value[day]))
 		}
 
-		shops = append(shops, &stub.ShopRole{
-			Shop: &stub.ShopPb{
-				ShopId: &stub.UuId{
+		shops = append(shops, &shop.ShopRole{
+			Shop: &shop.ShopPb{
+				ShopId: &pesanId.UuId{
 					Id: []byte(shopId.String()),
 				},
 				Name: name,
 				Tags: tags,
-				OpensAt: &stub.OperationHour{
+				OpensAt: &shop.OperationHour{
 					Hour:   int32(opensAt.Hour()),
 					Minute: int32(opensAt.Minute()),
 				},
-				ClosesAt: &stub.OperationHour{
+				ClosesAt: &shop.OperationHour{
 					Hour:   int32(closesAt.Hour()),
 					Minute: int32(closesAt.Minute()),
 				},
@@ -238,8 +236,8 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 				OperationDays: opDays,
 				Location:      &location,
 			},
-			Role: &stub.RolePb{
-				RoleId: &stub.UuId{
+			Role: &shop.RolePb{
+				RoleId: &pesanId.UuId{
 					Id: []byte(roleId.String()),
 				},
 				EditShop:       editShop.Bool,
@@ -252,14 +250,13 @@ func (s *protectedSrvr) GetShops(ctx context.Context, r *stub.ShopRequest) (*stu
 			},
 		})
 	}
-	return &stub.ShopPage{
+	return &shop.GetShopsResponse{
 		Shops:        shops,
 		FreshSession: newSesh,
 	}, nil
 }
 
-func (prtc *protectedSrvr) ShopDeviceStatus(ctx context.Context, r *stub.ShopDeviceStatusRequest) (*stub.ShopDeviceStatusReply, error) {
-
+func (prtc *) ShopDeviceStatus(ctx context.Context, r *shop.ShopDeviceStatusRequest) (*shop.ShopDeviceStatusResponse, error) {
 	shopId, err := uuid.ParseBytes(r.ShopId.Id)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
@@ -285,8 +282,8 @@ func (prtc *protectedSrvr) ShopDeviceStatus(ctx context.Context, r *stub.ShopDev
 	_, err = strm.Consumer(ctx, deviceId.String())
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return &stub.ShopDeviceStatusReply{
-				Status: stub.DeviceStatus_offline,
+			return &shop.ShopDeviceStatusResponse{
+				Status: shop.ShopDeviceStatus_offline,
 			}, nil
 		} else {
 			return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
@@ -294,7 +291,7 @@ func (prtc *protectedSrvr) ShopDeviceStatus(ctx context.Context, r *stub.ShopDev
 	}
 
 	// NOTE: next check whether this shop device is active
-	var deviceStatus *stub.DeviceStatus
+	var deviceStatus *shop.ShopDeviceStatus
 	var lastActive *time.Time
 	err = statements[ReadAShopDevice].QueryRow(shopId, deviceId).Scan(&deviceStatus, &lastActive)
 	if err != nil {
@@ -306,13 +303,13 @@ func (prtc *protectedSrvr) ShopDeviceStatus(ctx context.Context, r *stub.ShopDev
 	}
 
 	// NOTE: if connected but last_active has past 3 minutes, then we re-ping again
-	if *deviceStatus == stub.DeviceStatus_online && time.Since(*lastActive) > 2*time.Minute {
+	if *deviceStatus == shop.ShopDeviceStatus_online && time.Since(*lastActive) > 2*time.Minute {
 		// NOTE: re-ping
 		subject := fmt.Sprintf("shop.device.%s", deviceId.String())
 		var msg *nats.Msg
 		msg, err = shopJetstream.Conn().Request(subject, []byte("ping"), 10*time.Second)
 		if err != nil {
-			*deviceStatus = stub.DeviceStatus_offline
+			*deviceStatus = shop.ShopDeviceStatus_offline
 		}
 
 		if string(msg.Data) == "ping" {
@@ -320,12 +317,12 @@ func (prtc *protectedSrvr) ShopDeviceStatus(ctx context.Context, r *stub.ShopDev
 		}
 	}
 
-	return &stub.ShopDeviceStatusReply{
+	return &shop.ShopDeviceStatusResponse{
 		Status: *deviceStatus,
 	}, nil
 }
 
-func (prtc *protectedSrvr) OpenShop(ctx context.Context, r *stub.OpenShopRequest) (*emptypb.Empty, error) {
+func (s *shopService) OpenShop(ctx context.Context, r *shop.OpenShopRequest) (*shop.OpenShopResponse, error) {
 	shopId, err := uuid.ParseBytes(r.ShopId.Id)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
@@ -382,7 +379,7 @@ func (prtc *protectedSrvr) OpenShop(ctx context.Context, r *stub.OpenShopRequest
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
-	_, err = txn.Stmt(statements[UpdateAShopDevice]).Exec(time.Now(), stub.DeviceStatus_online, shopId, deviceId)
+	_, err = txn.Stmt(statements[UpdateAShopDevice]).Exec(time.Now(), shop.ShopDeviceStatus_offline, shopId, deviceId)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
@@ -416,10 +413,10 @@ func (prtc *protectedSrvr) OpenShop(ctx context.Context, r *stub.OpenShopRequest
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
-	return &emptypb.Empty{}, nil
+	return &shop.OpenShopResponse{}, nil
 }
 
-func (prtc *protectedSrvr) CloseShop(ctx context.Context, r *stub.CloseShopRequest) (*emptypb.Empty, error) {
+func (s *shopService) CloseShop(ctx context.Context, r *shop.CloseShopRequest) (*shop.CloseShopResponse, error) {
 	shopId, err := uuid.ParseBytes(r.ShopId.Id)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] invalid shop ID")
@@ -436,7 +433,7 @@ func (prtc *protectedSrvr) CloseShop(ctx context.Context, r *stub.CloseShopReque
 		}
 	}
 
-	return &emptypb.Empty{}, nil
+	return &shop.CloseShopResponse{}, nil
 }
 
 const (

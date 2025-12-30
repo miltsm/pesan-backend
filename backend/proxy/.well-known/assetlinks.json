@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "my.mildotdev.pesanseller.dev",
+      "sha256_cert_fingerprints": [
+        "8B:60:15:5A:31:D7:16:5D:87:E5:EA:78:76:87:F1:99:D5:40:FA:10:A9:BC:45:D3:4B:E5:65:DC:A6:10:76:8C"
+      ]
+    }
+  }
+]

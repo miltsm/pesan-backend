@@ -20,12 +20,14 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	pesanAuth "github.com/miltsm/pesan-backend/proto/auth/v1"
+	pesanDevice "github.com/miltsm/pesan-backend/proto/device/v1"
+	pesanShop "github.com/miltsm/pesan-backend/proto/shop/v1"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	stub "github.com/miltsm/pesan-grpc-stubs/go"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -55,20 +57,24 @@ var (
 	fbMsgClient                                            *messaging.Client
 )
 
-type publicSrvr struct {
-	stub.UnimplementedPublicServer
+type onboardService struct {
+	pesanAuth.UnimplementedOnboardServiceServer
 }
 
-func newPublicSrvr() *publicSrvr {
-	return &publicSrvr{}
+type authService struct {
+	pesanAuth.UnimplementedAuthServiceServer
 }
 
-type protectedSrvr struct {
-	stub.UnimplementedProtectedServer
+type reAuthService struct {
+	pesanAuth.UnimplementedReAuthServiceServer
 }
 
-func newProtectedSrvr() *protectedSrvr {
-	return &protectedSrvr{}
+type deviceService struct {
+	pesanDevice.UnimplementedDeviceServiceServer
+}
+
+type shopService struct {
+	pesanShop.UnimplementedShopServiceServer
 }
 
 func main() {
@@ -88,8 +94,11 @@ func main() {
 		return
 	}
 	srv := grpc.NewServer(grpc.UnaryInterceptor(unaryInterceptor), grpc.StreamInterceptor(streamInterceptor))
-	stub.RegisterPublicServer(srv, newPublicSrvr())
-	stub.RegisterProtectedServer(srv, newProtectedSrvr())
+	pesanAuth.RegisterOnboardServiceServer(srv, &onboardService{})
+	pesanAuth.RegisterAuthServiceServer(srv, &authService{})
+	pesanAuth.RegisterReAuthServiceServer(srv, &reAuthService{})
+	pesanShop.RegisterShopServiceServer(srv, &shopService{})
+	pesanDevice.RegisterDeviceServiceServer(srv, &deviceService{})
 
 	initialiseShopWorkerPeriodicChecks()
 
@@ -348,7 +357,7 @@ func prepareStatements() {
 	queries := map[StatementKey]string{
 		CreateAPasswordUser: `
 		WITH new_user AS (
-			INSERT INTO 
+			INSERT INTO
 				users(user_handle, display_name)
 			VALUES
 				($1, $2)
@@ -369,7 +378,7 @@ func prepareStatements() {
 				device_id
 		),
 		link_user_device AS (
-			INSERT INTO 
+			INSERT INTO
 				user_devices(user_id, device_id)
 			SELECT
 				user_id, device_id
@@ -411,7 +420,7 @@ func prepareStatements() {
 		SELECT user_id, device_id FROM new_user, new_device
 		`,
 		ReadAnUserByHandle: `
-			SELECT 
+			SELECT
 				user_id, user_handle, display_name
 			FROM
 				users
@@ -425,7 +434,7 @@ func prepareStatements() {
 				user_profiles
 			WHERE
 				user_handle = $1 or user_id::text = $1		`,
-		ReadAnUserProfileByCredentialId: `	
+		ReadAnUserProfileByCredentialId: `
 			SELECT
 				user_id, user_handle, display_name, passkey_count, last_password_updated_at
 			FROM
@@ -433,9 +442,9 @@ func prepareStatements() {
 			WHERE
 				passkey_id = $1
 		`,
-		ReadAnUserWithPasskeys: `	
-			SELECT  
-				user_handle,	
+		ReadAnUserWithPasskeys: `
+			SELECT
+				user_handle,
 				display_name,
 				passkey_id,
 				public_key,
@@ -444,9 +453,9 @@ func prepareStatements() {
 				flags,
 				authenticator_aaguid,
 				sign_count
-			FROM 
+			FROM
 				user_passkeys
-			WHERE 
+			WHERE
 				user_id = $1
 		`,
 		CreateAPublicKey: `
@@ -455,19 +464,19 @@ func prepareStatements() {
 			VALUES( $1, $2, $3, $4, $5, $6, $7)
 		`,
 		UpdateAPublicKey: `
-		UPDATE 
+		UPDATE
 			passkeys
 		SET
 			attestation_type = $1, transport = $2, flags = $3, sign_count = $4
 		WHERE
-			passkey_id = $5	
+			passkey_id = $5
 		`,
 		CreateAPassword: `
 			INSERT INTO
 				passwords(hashed, user_id)
 			VALUES
 				( $1, $2)
-			ON CONFLICT 
+			ON CONFLICT
 				(user_id)
 			DO UPDATE SET
 				hashed = EXCLUDED.hashed;
@@ -478,7 +487,7 @@ func prepareStatements() {
 		FROM
 			passwords
 		WHERE
-			user_id::text = $1 AND hashed = crypt($2, hashed)	
+			user_id::text = $1 AND hashed = crypt($2, hashed)
 		`,
 		CreateAShopAndReturnDevices: `
 		WITH new_shop as (
@@ -486,7 +495,7 @@ func prepareStatements() {
 			shops(name, tags, open_hour, closing_hour, contacts, operation_days, location, user_id)
 		VALUES
 			($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING shop_id	
+		RETURNING shop_id
 		)
 		SELECT new_shop.shop_id, devices.device_id, devices.fcm_token
 		FROM user_devices
@@ -523,7 +532,7 @@ func prepareStatements() {
 		WITH device_upsert AS (
 			INSERT INTO devices(device_id, name, platform, app_version)
 			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (device_id) 
+			ON CONFLICT (device_id)
 			DO UPDATE SET
 				name = COALESCE(EXCLUDED.name, devices.name),
 				platform = COALESCE(EXCLUDED.platform, devices.platform),
@@ -537,9 +546,9 @@ func prepareStatements() {
 		link_user_device AS (
 			INSERT INTO
 				user_devices(user_id, device_id)
-			SELECT 
-				$5, device_id 
-			FROM 
+			SELECT
+				$5, device_id
+			FROM
 				device_upsert
 			ON CONFLICT
 				(user_id, device_id)
@@ -557,10 +566,10 @@ func prepareStatements() {
 			device_id = $2
 		`,
 		ReadDeviceNKey: `
-		SELECT 
+		SELECT
 			nats_pub_key
 		FROM
-			devices	
+			devices
 		WHERE
 			device_id = $1
 		`,
@@ -577,8 +586,8 @@ func prepareStatements() {
 			shop_devices(fcm_topic, shop_id, device_id)
 		VALUES
 			($1, $2, $3)
-		ON CONFLICT 
-			(shop_id, device_id) 
+		ON CONFLICT
+			(shop_id, device_id)
 		DO NOTHING
 		`,
 		ReadAShopDevice: `
@@ -599,8 +608,8 @@ func prepareStatements() {
 			shop_id = $3 AND device_id = $4
 		`,
 		DeleteAShopDevice: `
-		DELETE FROM 
-			shop_devices 
+		DELETE FROM
+			shop_devices
 		WHERE
 			shop_id = $1 AND device_id = $2
 		`,

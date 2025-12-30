@@ -21,8 +21,6 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	stub "github.com/miltsm/pesan-grpc-stubs/go"
-
 	"google.golang.org/grpc/codes"
 
 	"google.golang.org/grpc/status"
@@ -32,6 +30,10 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+
+	pesanAuth "github.com/miltsm/pesan-backend/proto/auth/v1"
+	device "github.com/miltsm/pesan-backend/proto/device/v1"
+	pesanUuid "github.com/miltsm/pesan-backend/proto/uuid/v1"
 )
 
 const (
@@ -194,7 +196,7 @@ func getCachedAttestation(userhandle string) (*PublicKeyChallengeCache, error) {
 }
 
 // NOTE: attst-onboard
-func (s *publicSrvr) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardRequest) (*stub.PublicKeyOptions, error) {
+func (s *publicSrvr) PublicKeyOnboard(ctx context.Context, r *pesanAuth.PublicKeyOnboardRequest) (*pesanAuth.PublicKeyOnboardResponse, error) {
 	if len(r.UserHandle) < 6 {
 		return nil, status.Error(codes.InvalidArgument, "[WARN] user handle needs to be at least 6 characters")
 	}
@@ -207,9 +209,11 @@ func (s *publicSrvr) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardRe
 	// NOTE: return still valid challenge (cached)
 	cached, _ := getCachedAttestation(r.UserHandle)
 	if cached != nil {
-		return &stub.PublicKeyOptions{
-			Challenge:  *cached.Options,
-			ValidUntil: timestamppb.New(cached.Session.Expires),
+		return &pesanAuth.PublicKeyOnboardResponse{
+			Option: &pesanAuth.PublicKeyOption{
+				Challenge:  *cached.Options,
+				ValidUntil: timestamppb.New(cached.Session.Expires),
+			},
 		}, nil
 	}
 
@@ -248,9 +252,11 @@ func (s *publicSrvr) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardRe
 				return nil, status.Error(codes.Internal, "[ERROR] unable to marshal response")
 			}
 
-			return &stub.PublicKeyOptions{
-				Challenge:  options,
-				ValidUntil: timestamppb.New(session.Expires),
+			return &pesanAuth.PublicKeyOnboardResponse{
+				Option: &pesanAuth.PublicKeyOption{
+					Challenge:  options,
+					ValidUntil: timestamppb.New(session.Expires),
+				},
 			}, nil
 		} else {
 			return nil, status.Errorf(codes.Internal, "[ERROR] unable to create challenge:\n%v", err)
@@ -262,17 +268,18 @@ func (s *publicSrvr) OnboardWithPublicKey(ctx context.Context, r *stub.OnboardRe
 }
 
 // NOTE: attst-onboard
-func (s *publicSrvr) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.VerifyPublicKeyRequest) (*stub.UserSession, error) {
-	if r.UserHandle == nil || len(*r.UserHandle) == 0 {
+func (s *publicSrvr) VerifyOnboardPublicKey(ctx context.Context, r *pesanAuth.VerifyOnboardPublicKeyRequest) (*pesanAuth.VerifyOnboardPublicKeyResponse, error) {
+	pkreq := r.Request
+	if pkreq.UserHandle == nil || len(*pkreq.UserHandle) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "[WARN] missing user handle")
 	}
 
-	cached, err := getCachedAttestation(*r.UserHandle)
+	cached, err := getCachedAttestation(*pkreq.UserHandle)
 	if err != nil {
 		return nil, err
 	}
 
-	reader := bytes.NewBuffer(r.Signed)
+	reader := bytes.NewBuffer(pkreq.Signed)
 	req := http.Request{
 		Body: io.NopCloser(reader),
 	}
@@ -300,12 +307,12 @@ func (s *publicSrvr) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Veri
 
 	// NOTE: create device profile of this new user
 	var dvcNm *string
-	var pltfrm *stub.Platform
+	var pltfrm *device.Platform
 	var appVer *string
-	if r.DeviceInfo != nil {
-		dvcNm = r.DeviceInfo.DeviceName
-		pltfrm = r.DeviceInfo.Platform
-		appVer = r.DeviceInfo.AppVersion
+	if pkreq.DeviceInfo != nil {
+		dvcNm = pkreq.DeviceInfo.DeviceName
+		pltfrm = pkreq.DeviceInfo.Platform
+		appVer = pkreq.DeviceInfo.AppVersion
 	}
 
 	var userId uuid.UUID
@@ -338,22 +345,24 @@ func (s *publicSrvr) VerifyPublicKeyAndOnboard(ctx context.Context, r *stub.Veri
 	}
 
 	var totalPasskeys uint32 = 1
-	return &stub.UserSession{
-		AccessToken:           []byte(*accessToken),
-		RefreshToken:          []byte(*refreshToken),
-		UserHandle:            cached.User.UserHandle,
-		DisplayName:           cached.User.DisplayName,
-		TotalPasskey:          &totalPasskeys,
-		AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
-		RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
-		DeviceId: &stub.UuId{
-			Id: []byte(deviceId.String()),
+	return &pesanAuth.VerifyOnboardPublicKeyResponse{
+		UserSession: &pesanAuth.UserSession{
+			AccessToken:           []byte(*accessToken),
+			RefreshToken:          []byte(*refreshToken),
+			UserHandle:            cached.User.UserHandle,
+			DisplayName:           cached.User.DisplayName,
+			TotalPasskey:          &totalPasskeys,
+			AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
+			RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
+			DeviceId: &pesanUuid.UuId{
+				Id: []byte(deviceId.String()),
+			},
 		},
 	}, nil
 }
 
 // NOTE: pw-onboard
-func (s *publicSrvr) OnboardWithPassword(ctx context.Context, r *stub.OnboardRequest) (*stub.UserSession, error) {
+func (s *publicSrvr) PasswordOnboard(ctx context.Context, r *pesanAuth.PasswordOnboardRequest) (*pesanAuth.PasswordOnboardResponse, error) {
 	if len(r.UserHandle) < 6 {
 		return nil, status.Error(codes.InvalidArgument, "[WARN] userhandle<6")
 	}
@@ -383,7 +392,7 @@ func (s *publicSrvr) OnboardWithPassword(ctx context.Context, r *stub.OnboardReq
 
 	// NOTE: create device profile of this new user
 	var dvcNm *string
-	var pltfrm *stub.Platform
+	var pltfrm *device.Platform
 	var appVer *string
 	if r.DeviceInfo != nil {
 		dvcNm = r.DeviceInfo.DeviceName
@@ -421,17 +430,19 @@ func (s *publicSrvr) OnboardWithPassword(ctx context.Context, r *stub.OnboardReq
 	}
 
 	var totalPasskeys uint32 = 0
-	return &stub.UserSession{
-		AccessToken:           []byte(*accessToken),
-		RefreshToken:          []byte(*refreshToken),
-		UserHandle:            r.UserHandle,
-		DisplayName:           displayName,
-		TotalPasskey:          &totalPasskeys,
-		LastPasswordUpdated:   timestamppb.New(time.Now()),
-		AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
-		RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
-		DeviceId: &stub.UuId{
-			Id: []byte(deviceId.String()),
+	return &pesanAuth.PasswordOnboardResponse{
+		UserSession: &pesanAuth.UserSession{
+			AccessToken:           []byte(*accessToken),
+			RefreshToken:          []byte(*refreshToken),
+			UserHandle:            r.UserHandle,
+			DisplayName:           displayName,
+			TotalPasskey:          &totalPasskeys,
+			LastPasswordUpdated:   timestamppb.New(time.Now()),
+			AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
+			RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
+			DeviceId: &pesanUuid.UuId{
+				Id: []byte(deviceId.String()),
+			},
 		},
 	}, nil
 
@@ -493,7 +504,7 @@ func clearCachedAssertation(challengeId string) {
 }
 
 // NOTE: assrt-login
-func (s *publicSrvr) DiscoverLogin(ctx context.Context, _ *emptypb.Empty) (*stub.PublicKeyOptions, error) {
+func (s *publicSrvr) DiscoverLogin(ctx context.Context, _ *pesanAuth.DiscoverLoginRequest) (*pesanAuth.DiscoverLoginResponse, error) {
 	assertation, session, err := wbAuthn.BeginDiscoverableMediatedLogin(protocol.MediationConditional)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
@@ -517,14 +528,16 @@ func (s *publicSrvr) DiscoverLogin(ctx context.Context, _ *emptypb.Empty) (*stub
 		return nil, status.Errorf(codes.Internal, "[ERROR] %v", err)
 	}
 
-	return &stub.PublicKeyOptions{
-		Challenge:  options,
-		ValidUntil: timestamppb.New(session.Expires),
+	return &pesanAuth.DiscoverLoginResponse{
+		Option: &pesanAuth.PublicKeyOption{
+			Challenge:  options,
+			ValidUntil: timestamppb.New(session.Expires),
+		},
 	}, nil
 }
 
 // NOTE: assrt-login
-func (s *publicSrvr) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPublicKeyRequest) (*stub.UserSession, error) {
+func (s *publicSrvr) VerifyPublicKeyLogin(ctx context.Context, r *pesanAuth.VerifyPublicKeyLoginRequest) (*pesanAuth.VerifyPublicKeyLoginResponse, error) {
 	data, err := protocol.ParseCredentialRequestResponseBytes(r.Signed)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "[ERROR] unable to parse signed challenge")
@@ -587,7 +600,7 @@ func (s *publicSrvr) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPub
 	// NOTE: create or update device profile of this existing user
 	dvcId := uuid.New()
 	var dvcNm *string
-	var pltfrm *stub.Platform
+	var pltfrm *device.Platform
 	var appVer *string
 	if r.DeviceInfo != nil {
 		if r.DeviceInfo.DeviceId != nil && len(r.DeviceInfo.DeviceId.Id) > 0 {
@@ -638,23 +651,25 @@ func (s *publicSrvr) VerifyPublicKeyLogin(ctx context.Context, r *stub.VerifyPub
 		return nil, err
 	}
 
-	return &stub.UserSession{
-		AccessToken:           []byte(*accessToken),
-		RefreshToken:          []byte(*refreshToken),
-		UserHandle:            userHandle,
-		DisplayName:           displayName,
-		TotalPasskey:          &totalPasskeys,
-		LastPasswordUpdated:   timestamppb.New(lastPasswordUpdated.Time),
-		AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
-		RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
-		DeviceId: &stub.UuId{
-			Id: []byte(dvcId.String()),
+	return &pesanAuth.VerifyPublicKeyLoginResponse{
+		UserSession: &pesanAuth.UserSession{
+			AccessToken:           []byte(*accessToken),
+			RefreshToken:          []byte(*refreshToken),
+			UserHandle:            userHandle,
+			DisplayName:           displayName,
+			TotalPasskey:          &totalPasskeys,
+			LastPasswordUpdated:   timestamppb.New(lastPasswordUpdated.Time),
+			AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
+			RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
+			DeviceId: &pesanUuid.UuId{
+				Id: []byte(dvcId.String()),
+			},
 		},
 	}, nil
 }
 
 // NOTE: pw-login
-func (s *publicSrvr) LoginWithPassword(ctx context.Context, r *stub.PasswordLoginRequest) (*stub.UserSession, error) {
+func (s *publicSrvr) LoginWithPassword(ctx context.Context, r *pesanAuth.LoginWithPasswordRequest) (*pesanAuth.LoginWithPasswordResponse, error) {
 	if len(r.UserHandle) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "[WARN] user handle can't be empty")
 	}
@@ -681,7 +696,7 @@ func (s *publicSrvr) LoginWithPassword(ctx context.Context, r *stub.PasswordLogi
 
 	dvcId := uuid.New()
 	var dvcNm *string
-	var pltfrm *stub.Platform
+	var pltfrm *device.Platform
 	var appVer *string
 	if r.DeviceInfo != nil {
 		if r.DeviceInfo.DeviceId != nil && len(r.DeviceInfo.DeviceId.Id) > 0 {
@@ -723,23 +738,25 @@ func (s *publicSrvr) LoginWithPassword(ctx context.Context, r *stub.PasswordLogi
 		return nil, err
 	}
 
-	return &stub.UserSession{
-		AccessToken:           []byte(*accessToken),
-		RefreshToken:          []byte(*refreshToken),
-		UserHandle:            user.UserHandle,
-		DisplayName:           user.DisplayName,
-		TotalPasskey:          &totalPasskey,
-		LastPasswordUpdated:   timestamppb.New(lastPwdUpdated.Time),
-		AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
-		RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
-		DeviceId: &stub.UuId{
-			Id: []byte(dvcId.String()),
+	return &pesanAuth.LoginWithPasswordResponse{
+		UserSession: &pesanAuth.UserSession{
+			AccessToken:           []byte(*accessToken),
+			RefreshToken:          []byte(*refreshToken),
+			UserHandle:            user.UserHandle,
+			DisplayName:           user.DisplayName,
+			TotalPasskey:          &totalPasskey,
+			LastPasswordUpdated:   timestamppb.New(lastPwdUpdated.Time),
+			AccessTokenExpiresAt:  timestamppb.New(*accessExpiry),
+			RefreshTokenExpiresAt: timestamppb.New(*refreshExpiry),
+			DeviceId: &pesanUuid.UuId{
+				Id: []byte(dvcId.String()),
+			},
 		},
 	}, nil
 }
 
 // NOTE: refresh
-func refreshSession(userId uuid.UUID, token []byte) (*stub.RefreshReply, error) {
+func refreshSession(userId uuid.UUID, token []byte) (*pesanAuth.NewSession, error) {
 	if len(token) == 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "[ERROR] refresh token missing")
 	}
@@ -754,7 +771,7 @@ func refreshSession(userId uuid.UUID, token []byte) (*stub.RefreshReply, error) 
 		if err != nil {
 			return nil, err
 		}
-		return &stub.RefreshReply{
+		return &pesanAuth.NewSession{
 			AccessToken:          []byte(*aTkn),
 			AccessTokenExpiresAt: timestamppb.New(*aExp),
 		}, nil
@@ -769,16 +786,16 @@ func refreshSession(userId uuid.UUID, token []byte) (*stub.RefreshReply, error) 
 }
 
 // NOTE: refresh
-func (s *publicSrvr) RefreshSession(ctx context.Context, r *stub.RefreshRequest) (*stub.RefreshReply, error) {
+func (s *reAuthService) RefreshSession(ctx context.Context, r *pesanAuth.RefreshSessionRequest) (*pesanAuth.Session, error) {
 	usrId := ctx.Value("user_id").(uuid.UUID)
 	return refreshSession(usrId, r.Token)
 }
 
 // NOTE: reauth
 // NOTE: this an extension of auth middleware
-func requiresRefreshOrReauth(ctx context.Context, refreshTkn []byte, reauthData *stub.ReAuthRequest) (*stub.RefreshReply, *stub.PublicKeyOptions, error) {
+func requiresRefreshOrReauth(ctx context.Context, refreshTkn []byte, reauthData *pesanAuth.ReAuthRequest) (*pesanAuth.Session, *pesanAuth.PublicKeyOption, error) {
 	userId := ctx.Value("user_id").(uuid.UUID)
-	var freshSession *stub.RefreshReply
+	var freshSession *pesanAuth.Session
 	err := context.Cause(ctx)
 	if err != nil {
 		// NOTE: access token expired
@@ -801,13 +818,13 @@ func requiresRefreshOrReauth(ctx context.Context, refreshTkn []byte, reauthData 
 				freshSession, refreshErr = refreshSession(userId, refreshTkn)
 				if refreshErr != nil {
 					if errors.Is(refreshErr, jwt.ErrTokenExpired) {
-						var opts *stub.PublicKeyOptions
+						var opts *pesanAuth.PublicKeyOption
 						opts, optsErr = getLoginChallenge(userId)
 
 						if optsErr != nil {
 							return nil, nil, optsErr
 						}
-						return nil, &stub.PublicKeyOptions{
+						return nil, &pesanAuth.PublicKeyOption{
 							Challenge:  opts.Challenge,
 							ValidUntil: opts.ValidUntil,
 						}, nil
@@ -869,11 +886,11 @@ func clearReAuthCache(userId uuid.UUID) {
 }
 
 // NOTE: reauth
-func getLoginChallenge(userId uuid.UUID) (*stub.PublicKeyOptions, error) {
+func getLoginChallenge(userId uuid.UUID) (*pesanAuth.PublicKeyOption, error) {
 	// NOTE: check cache first
 	cached, _ := getCachedAssertation(userId.String())
 	if cached != nil {
-		return &stub.PublicKeyOptions{
+		return &pesanAuth.PublicKeyOption{
 			Challenge:  *cached.Options,
 			ValidUntil: timestamppb.New(cached.Session.Expires),
 		}, nil
@@ -937,25 +954,25 @@ func getLoginChallenge(userId uuid.UUID) (*stub.PublicKeyOptions, error) {
 		return nil, err
 	}
 
-	return &stub.PublicKeyOptions{
+	return &pesanAuth.PublicKeyOption{
 		Challenge:  opts,
 		ValidUntil: timestamppb.New(sssn.Expires),
 	}, nil
 }
 
 // NOTE: reauth
-func (s *protectedSrvr) ReAuth(ctx context.Context, _ *emptypb.Empty) (*stub.PublicKeyOptions, error) {
+func (s *protectedSrvr) ReAuth(ctx context.Context, _ *emptypb.Empty) (*pesanAuth.PublicKeyOption, error) {
 	userId := ctx.Value("user_id").(uuid.UUID)
 	return getLoginChallenge(userId)
 }
 
 // NOTE: reauth
-func (s *protectedSrvr) VerifyPublicKeyReAuth(ctx context.Context, r *stub.VerifyPublicKeyRequest) (*stub.RefreshReply, error) {
+func (s *protectedSrvr) VerifyPublicKeyReAuth(ctx context.Context, r *pesanAuth.VerifyPublicKeyRequest) (*pesanAuth.Session, error) {
 	return validatePubKey(ctx, r.Signed)
 }
 
 // NOTE: reauth
-func validatePubKey(ctx context.Context, signed []byte) (*stub.RefreshReply, error) {
+func validatePubKey(ctx context.Context, signed []byte) (*pesanAuth.Session, error) {
 	userId := ctx.Value("user_id").(uuid.UUID)
 
 	err := checkTotalReAuthAttempts(userId)
@@ -999,7 +1016,7 @@ func validatePubKey(ctx context.Context, signed []byte) (*stub.RefreshReply, err
 
 	clearReAuthCache(userId)
 
-	return &stub.RefreshReply{
+	return &pesanAuth.Session{
 		AccessToken:           []byte(*accessToken),
 		RefreshToken:          []byte(*refreshToken),
 		AccessTokenExpiresAt:  timestamppb.New(*accessExp),
@@ -1008,13 +1025,13 @@ func validatePubKey(ctx context.Context, signed []byte) (*stub.RefreshReply, err
 }
 
 // NOTE: reauth
-func (s *protectedSrvr) ReAuthWithPassword(ctx context.Context, r *stub.ReAuthPasswordRequest) (*stub.RefreshReply, error) {
+func (s *protectedSrvr) PasswordReAuth(ctx context.Context, r *pesanAuth.PasswordReAuthRequest) (*pesanAuth.Session, error) {
 	userId := ctx.Value("user_id").(uuid.UUID)
 	return passwordReauthentication(userId, r.Password)
 }
 
 // NOTE: reauth
-func passwordReauthentication(userId uuid.UUID, pw []byte) (*stub.RefreshReply, error) {
+func passwordReauthentication(userId uuid.UUID, pw []byte) (*pesanAuth.Session, error) {
 	err := checkTotalReAuthAttempts(userId)
 	if err != nil {
 		return nil, err
@@ -1042,7 +1059,7 @@ func passwordReauthentication(userId uuid.UUID, pw []byte) (*stub.RefreshReply, 
 
 	clearReAuthCache(userId)
 
-	return &stub.RefreshReply{
+	return &pesanAuth.Session{
 		AccessToken:           []byte(*accssTkn),
 		RefreshToken:          []byte(*rfshTkn),
 		AccessTokenExpiresAt:  timestamppb.New(*accssExp),
@@ -1051,7 +1068,7 @@ func passwordReauthentication(userId uuid.UUID, pw []byte) (*stub.RefreshReply, 
 }
 
 // NOTE: session update
-func (s *protectedSrvr) SetFcmToken(ctx context.Context, r *stub.SetFcmRequest) (*emptypb.Empty, error) {
+func (s *protectedSrvr) SetFcmToken(ctx context.Context, r *device.SetFcmTokenRequest) (*emptypb.Empty, error) {
 	fmt.Println("setting fcm token..")
 	// TODO: need to revised this with uuid.Parse; it wont crash the server, would rather return an error
 	userId := ctx.Value("user_id").(uuid.UUID)

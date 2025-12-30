@@ -17,10 +17,8 @@ WORKDIR /src
 # Leverage bind mounts to go.sum and go.mod to avoid having to copy them into
 # the container.
 RUN --mount=type=cache,target=/go/pkg/mod/ \
-    --mount=type=bind,source=/pesan-grpc-stubs/go.sum,target=/pesan-grpc-stubs/go.sum \
-    --mount=type=bind,source=/pesan-grpc-stubs/go.mod,target=/pesan-grpc-stubs/go.mod \
-    --mount=type=bind,source=/pesan-backend/go.sum,target=go.sum \
-    --mount=type=bind,source=/pesan-backend/go.mod,target=go.mod \
+    --mount=type=bind,source=/go.sum,target=go.sum \
+    --mount=type=bind,source=/go.mod,target=go.mod \
     go mod download -x
 
 # This is the architecture you're building for, which is passed in by the builder.
@@ -33,7 +31,7 @@ ARG TARGETARCH
 # source code into the container.
 RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=type=bind,target=. \
-    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /bin/server ./pesan-backend
+    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /bin/server .
 
 ################################################################################
 # Create a new stage for running the application that contains the minimal
