@@ -7,7 +7,7 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 import "uuid/v1/uuid.proto";
 
-option go_package = "./v1";
+option go_package = "github.com/miltsm/pesan/backend/proto/shop/v1;shopv1";
 
 service ShopService {
   rpc CreateNewShop(CreateNewShopRequest) returns (CreateNewShopRequest);
@@ -51,11 +51,6 @@ enum Day {
   sunday = 6;
 }
 
-message ReAuthRequest {
-  optional bytes signed = 1;
-  optional bytes password = 2;
-}
-
 message CreateNewShopRequest {
   string name = 1;
   repeated Contact contacts = 2;
@@ -66,7 +61,7 @@ message CreateNewShopRequest {
   repeated Day operation_days = 7;
   // this is to allow the refresh process efficiently
   optional bytes refresh_token = 8;
-  optional ReAuthRequest r_auth = 9;
+  optional auth.v1.ReAuthRequest r_auth = 9;
 }
 
 message CreateNewShopResponse {
@@ -81,7 +76,7 @@ message GetShopsRequest {
   google.protobuf.Timestamp last_requested_at = 2;
   // this is to allow the refresh process efficiently
   optional bytes refresh_token = 3;
-  optional ReAuthRequest r_auth = 4;
+  optional auth.v1.ReAuthRequest r_auth = 4;
 }
 
 message ShopPb {

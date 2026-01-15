@@ -2,7 +2,10 @@ syntax = "proto3";
 
 package device.v1;
 
-option go_package = "./v1";
+import "google/protobuf/empty.proto";
+import "uuid/v1/uuid.proto";
+
+option go_package = "github.com/miltsm/pesan/backend/proto/device/v1;devicev1";
 
 enum Platform {
   web = 0;
@@ -14,4 +17,13 @@ message Device {
   string name = 1;
   Platform platform = 2;
   string app_version = 3;
+}
+
+service DeviceService {
+  rpc SetFcmToken(SetFcmTokenRequest) returns (google.protobuf.Empty);
+}
+
+message SetFcmTokenRequest {
+  uuid.v1.UuId device_id = 1;
+  string new_fcm_token = 2;
 }

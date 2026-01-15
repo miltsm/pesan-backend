@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package uuid.v1;
 
-option go_package = "./v1";
+option go_package = "github.com/miltsm/pesan/backend/proto/uuid/v1;uuidv1";
 
 message UuId {
   bytes id = 1;
